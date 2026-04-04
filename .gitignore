@@ -1,0 +1,98 @@
+# -----------------------------------------------------------------------------
+# Unreal Engine 5 — build, cache, binaires (ne pas versionner)
+# -----------------------------------------------------------------------------
+
+# Binaires compilés
+Binaries/
+Plugins/*/Binaries/
+
+# Fichiers intermédiaires de compilation
+Intermediate/
+Plugins/*/Intermediate/
+
+# Cache dérivé (très volumineux, régénéré par l’éditeur)
+DerivedDataCache/
+
+# Données locales de l’éditeur : logs, autosave, captures, crash reports…
+Saved/
+# Si tu veux versionner uniquement les configs par défaut du projet, décommente les 3 lignes suivantes et commente la ligne "Saved/" ci-dessus :
+# Saved/*
+# !Saved/Config/
+# !Saved/Config/**
+
+# Builds packagés / staging
+Build/
+!Build/**/*.png
+!Build/**/*.ico
+
+# Fichiers générés par l’IDE / moteur
+.vs/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+.idea/
+*.sln
+*.suo
+*.user
+*.userosscache
+*.VC.db
+*.VC.opendb
+*.opensdf
+*.sdf
+*.xcodeproj
+*.xcworkspace
+
+# -----------------------------------------------------------------------------
+# Fichiers lourds : sources DCC / archives (hors Content Unreal)
+# Place ici tes FBX, blend, etc. si tu ne veux pas les pousser sur GitHub.
+# -----------------------------------------------------------------------------
+
+# Dossiers dédiés aux sources 3D / textures brutes (crée-les si besoin)
+SourceArt/
+RawAssets/
+_DCC/
+Megascans/_Source/
+
+# Archives et grosses données hors moteur
+*.zip
+*.7z
+*.rar
+*.tar
+*.gz
+
+# Formats source 3D courants (décommente si tu stockes ça dans le dépôt)
+# *.fbx
+# *.obj
+# *.blend
+# *.blend1
+# *.max
+# *.ma
+# *.mb
+# *.abc
+# *.usd
+# *.usda
+# *.usdc
+# *.usdz
+# *.gltf
+# *.glb
+
+# -----------------------------------------------------------------------------
+# Divers
+# -----------------------------------------------------------------------------
+
+*.log
+*.tmp
+*.temp
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# -----------------------------------------------------------------------------
+# IMPORTANT — Content Unreal (.uasset, .umap)
+# -----------------------------------------------------------------------------
+# Ce sont les assets importés dans le projet. Les ignorer = dépôt sans niveaux
+# ni meshes dans l’éditeur après clone. En général on les COMMIT, ou on utilise
+# Git LFS pour les gros .uasset. Ne décommente pas sauf si tu sais ce que tu fais.
+# Content/**/*.uasset
+# Content/**/*.umap

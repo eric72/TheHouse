@@ -1,0 +1,29 @@
+# Mur : pivot à l'origine = coin bas-gauche (min X, min Y, Z=0).
+# Le volume s'étend en +X (largeur), +Y (profondeur), +Z (hauteur).
+# Unités : cm (comme Unreal). Boîte 200 x 20 x 300 cm.
+# Dans Unreal : Static Mesh, Translation 0,0,0 = ce coin à l'origine de l'acteur.
+# Désactiver bAlignMeshBottomToActorOrigin sur ATheHouseSmartWall.
+
+o SM_WallPivotBottomLeft
+
+v 0.0 0.0 0.0
+v 200.0 0.0 0.0
+v 200.0 20.0 0.0
+v 0.0 20.0 0.0
+v 0.0 0.0 300.0
+v 200.0 0.0 300.0
+v 200.0 20.0 300.0
+v 0.0 20.0 300.0
+
+# Face bas (normale -Z)
+f 1 2 3 4
+# Face haut (normale +Z)
+f 5 6 7 8
+# Face Y=0 (normale -Y)
+f 1 5 6 2
+# Face Y=20 (normale +Y)
+f 4 3 7 8
+# Face X=0 (normale -X)
+f 1 4 8 5
+# Face X=200 (normale +X)
+f 2 6 7 3

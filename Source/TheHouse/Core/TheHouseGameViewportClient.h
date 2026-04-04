@@ -1,0 +1,17 @@
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Engine/GameViewportClient.h"
+#include "TheHouseGameViewportClient.generated.h"
+
+/**
+ * Intercepte la molette au niveau de la vue jeu (avant les problèmes Game+UI / Slate).
+ */
+UCLASS()
+class THEHOUSE_API UTheHouseGameViewportClient : public UGameViewportClient
+{
+	GENERATED_BODY()
+
+public:
+	virtual bool InputAxis(const FInputKeyEventArgs& EventArgs) override;
+};
