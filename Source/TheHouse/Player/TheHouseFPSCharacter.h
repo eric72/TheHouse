@@ -41,4 +41,19 @@ public:
 	/** If false, this character cannot be selected by the RTS Controller */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Selection")
 	bool bCanBeSelected;
+
+private:
+    bool bMoveFwd = false;
+    bool bMoveBwd = false;
+    bool bMoveRight = false;
+    bool bMoveLeft = false;
+
+    void MoveFwdPressed();
+    void MoveFwdReleased();
+    void MoveBwdPressed();
+    void MoveBwdReleased();
+    void MoveRightPressed();
+    void MoveRightReleased();
+    void MoveLeftPressed();
+    void MoveLeftReleased();
 };
