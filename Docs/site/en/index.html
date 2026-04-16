@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Developer Guide — TheHouse</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+  <div class="lang-corner" role="navigation" aria-label="Language">
+    <span>Lang</span>
+    <a href="../fr/index.html">FR</a>
+    <a href="index.html" aria-current="true">EN</a>
+  </div>
+
+  <div class="doc-layout">
+    <aside class="doc-sidebar">
+      <div class="doc-brand" aria-hidden="true">
+        <div class="doc-brand-mark">TH</div>
+        <span class="doc-brand-text">TheHouse</span>
+      </div>
+      <a class="back-home" href="../index.html">← Home</a>
+      <h2>Contents</h2>
+      <nav>
+        <a href="#intro">Introduction</a>
+        <a href="#vision">Vision</a>
+        <a href="#archi">Architecture</a>
+        <a href="#tree">Source tree</a>
+        <a href="#config">Configuration</a>
+        <a href="#inputs">Input (keys)</a>
+        <a href="#gamemode">GameMode</a>
+        <a href="#viewport">Viewport</a>
+        <a href="#pc">PlayerController</a>
+        <a href="#rts">RTS camera</a>
+        <a href="#fps">FPS</a>
+        <a href="#hud">HUD</a>
+        <a href="#object">ATheHouseObject</a>
+        <a href="#placement">Placement</a>
+        <a href="#selectable">ITheHouseSelectable</a>
+        <a href="#ai">AI slots</a>
+        <a href="#debug">Debug</a>
+        <a href="#pitfalls">Pitfalls</a>
+        <a href="#refs">References</a>
+      </nav>
+    </aside>
+
+    <main class="doc-main">
+      <p class="meta"><strong>Full reference:</strong> <a href="../../Developer/GUIDE_EN.md">GUIDE_EN.md</a> (complete tables and lists).</p>
+
+      <h1 id="intro">Developer Guide — TheHouse</h1>
+      <p>Onboarding documentation for the C++ gameplay systems. <strong>Engine:</strong> Unreal Engine 5.7 · <strong>Module:</strong> <code>TheHouse</code>.</p>
+
+      <h2 id="vision">Game vision</h2>
+      <p>Casino management / <strong>RTS</strong> (top-down camera, placement). <strong>FPS</strong> as a secondary activity — FPS does <strong>not</strong> run casino management. See <code>Docs/PROJECT_OVERVIEW.md</code> and <code>Docs/SYSTEMS.md</code>.</p>
+      <p>C++ focus: RTS camera, FPS switch, placement, selection, NPC slots, camera occlusion, walls.</p>
+
+      <h2 id="archi">High-level architecture</h2>
+      <pre class="ascii" aria-label="Architecture diagram">ATheHouseGameModeBase
+  DefaultPawn = ATheHouseCameraPawn
+  PlayerController = ATheHousePlayerController
+  HUD = ATheHouseHUD
+
+UTheHouseGameViewportClient → mouse wheel → RTS zoom (before PlayerInput issues)
+ATheHousePlayerController → possesses RTS or FPS, placement, selection</pre>
+
+      <h2 id="tree">Source tree</h2>
+      <table>
+        <thead><tr><th>Path</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr><td><code>Core/TheHouseGameModeBase</code></td><td>Default RTS pawn, PC, HUD; enforces <code>ATheHousePlayerController</code> if BP is wrong.</td></tr>
+          <tr><td><code>Core/TheHouseGameViewportClient</code></td><td>Intercepts <code>MouseWheelAxis</code> for zoom.</td></tr>
+          <tr><td><code>Core/TheHouseHUD</code></td><td>RTS selection rectangle.</td></tr>
+          <tr><td><code>Core/TheHouseSelectable.h</code></td><td><code>ITheHouseSelectable</code> interface.</td></tr>
+          <tr><td><code>Player/TheHousePlayerController</code></td><td>RTS/FPS, grid, placement, selection, input timer.</td></tr>
+          <tr><td><code>Player/TheHouseCameraPawn</code></td><td>Spring arm, boom pitch, occlusion.</td></tr>
+          <tr><td><code>Player/TheHouseFPSCharacter</code></td><td>FPS + selectable.</td></tr>
+          <tr><td><code>Object/TheHouseObject</code></td><td>Placeable object, exclusion zone, NPCs.</td></tr>
+          <tr><td><code>Placement/TheHousePlacementTypes.h</code></td><td><code>EPlacementState</code>.</td></tr>
+          <tr><td><code>AI/TheHouseObjectSlotUserComponent</code></td><td>AI: reserve slot, MoveTo, align, montage.</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="config">Configuration & entry point</h2>
+      <ul>
+        <li><code>TheHouse.uproject</code>: Enhanced Input plugin <strong>disabled</strong> — legacy mappings in <code>DefaultInput.ini</code>.</li>
+        <li><code>DefaultEngine.ini</code>: <code>GameViewportClientClassName=/Script/TheHouse.TheHouseGameViewportClient</code>.</li>
+        <li>Level game mode is often <code>BP_HouseGameMode</code> — keep Player Controller compatible with <code>ATheHousePlayerController</code>.</li>
+      </ul>
+
+      <h2 id="inputs">Input (keys, mouse)</h2>
+      <p>Bindings live in <strong><code>Config/DefaultInput.ini</code></strong>; the Player Controller forces a classic <code>UInputComponent</code>. Full tables: <a href="../../Developer/GUIDE_EN.md">GUIDE_EN.md</a> (section <strong>Input: keys and mouse</strong>).</p>
+      <h3>Actions</h3>
+      <table>
+        <thead><tr><th>Action</th><th>Keys</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr><td><code>DebugToggleFPS</code></td><td><strong>F</strong></td><td>RTS → FPS at ground; FPS → back to RTS.</td></tr>
+          <tr><td><code>RotateModifier</code></td><td><strong>Alt</strong>, <strong>RMB</strong></td><td>Camera rotate: blocks selection / placement confirm on LMB.</td></tr>
+          <tr><td><code>Select</code></td><td><strong>LMB</strong></td><td>Selection box; in placement: confirm.</td></tr>
+          <tr><td><code>DebugPlaceObject</code></td><td><strong>P</strong></td><td>Start / cancel placement preview (if class set).</td></tr>
+        </tbody>
+      </table>
+      <h3>Axes</h3>
+      <table>
+        <thead><tr><th>Axis</th><th>Keys</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr><td><code>MoveForward</code></td><td>Z, W / S</td><td>RTS move.</td></tr>
+          <tr><td><code>MoveRight</code></td><td>D / Q, A</td><td>RTS strafe.</td></tr>
+          <tr><td><code>Turn</code> / <code>LookUp</code></td><td>Mouse X / Y</td><td>Yaw; pitch FPS / RTS boom.</td></tr>
+          <tr><td><code>Zoom</code></td><td><strong>Wheel</strong></td><td>RTS zoom (+ viewport path for reliability).</td></tr>
+        </tbody>
+      </table>
+      <h3>Placement preview (RTS): wheel — zoom or rotate?</h3>
+      <p>Only while a <strong>placement preview</strong> is active (<code>EPlacementState::Previewing</code>) and you possess the <strong>RTS pawn</strong>.</p>
+      <p>The <strong>preview</strong> is the <strong><code>ATheHouseObject</code></strong> actor spawned for placement preview (<strong><code>PreviewActor</code></strong> on the Player Controller): the same object type you are about to place, before you confirm.</p>
+      <table>
+        <thead><tr><th>Input</th><th>Effect</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Wheel</strong> without <strong>Shift</strong></td><td><strong>Zoom in/out</strong> on the RTS camera (spring arm length): <code>Zoom</code> axis + <code>TheHouse_ApplyWheelZoom</code> — same as outside placement.</td></tr>
+          <tr><td><strong>Shift</strong> (left or right) <strong>+ wheel</strong></td><td><strong>No zoom</strong>: <code>TheHouse_ApplyWheelZoom</code> returns early. Rotation applies to that preview <strong><code>ATheHouseObject</code></strong>: <code>PlayerTick</code> uses discrete <strong>scroll up/down</strong> steps to <strong>rotate</strong> that actor’s <strong>yaw</strong> by <code>PlacementRotationStepDegrees</code> per notch (default <strong>15°</strong> on the PC).</td></tr>
+        </tbody>
+      </table>
+      <p><strong>Note:</strong> this is not an optical “zoom on the pivot” — it <strong>rotates</strong> that <strong><code>ATheHouseObject</code></strong> placement ghost on the ground. Tune step size on <code>ATheHousePlayerController</code> (<code>PlacementRotationStepDegrees</code>).</p>
+      <p><strong>Other code fallbacks:</strong> placement confirm via LMB in <code>PlayerTick</code>; ~120 Hz poll for WASD/ZQSD when needed.</p>
+
+      <h2 id="gamemode">GameMode (<code>ATheHouseGameModeBase</code>)</h2>
+      <p>Default pawn = RTS camera, PC = <code>ATheHousePlayerController</code>, HUD = <code>ATheHouseHUD</code>. <code>InitGame</code> forces the correct PC class if a Blueprint left Epic’s default — otherwise input appears broken.</p>
+
+      <h2 id="viewport">Viewport client</h2>
+      <p><code>UTheHouseGameViewportClient::InputAxis</code> handles the wheel before Game+UI swallow it. Calls <code>TheHouse_ApplyWheelZoom</code> and returns <code>true</code> without <code>Super</code> to avoid double zoom.</p>
+
+      <h2 id="pc">PlayerController</h2>
+      <h3>Responsibilities</h3>
+      <ul>
+        <li><code>RTSPawnReference</code> and <code>ActiveFPSCharacter</code>.</li>
+        <li>RTS: plane movement, zoom (spring arm length), yaw on controller, pitch on <strong>boom</strong>.</li>
+        <li><code>TheHouse_PollInputFrame</code> (~120 Hz) for WASD when PlayerInput / Slate focus fail.</li>
+        <li>Placement: cursor preview, grid snap, Shift+wheel rotation, click confirm.</li>
+        <li>Selection: HUD rect; <code>ITheHouseSelectable</code> actors → <code>OnSelect</code>.</li>
+      </ul>
+      <h3>RTS ↔ FPS</h3>
+      <ul>
+        <li><code>SwitchToRTS</code>: cancel placement, sync RTS to FPS height, repossess RTS, destroy FPS, show cursor.</li>
+        <li><code>SwitchToFPS</code>: spawn character, possess, hide test cubes, game-only input.</li>
+        <li><code>DebugSwitchToFPS</code>: trace from mouse to find ground.</li>
+      </ul>
+      <h3>Zoom</h3>
+      <p>Tunables: <code>RTSWheelZoomMultiplier</code>, <code>RTSZoomSpeed</code>, <code>RTSMinArmDeltaPerWheelEvent</code>, interpolation, cursor-relative zoom. During placement: Shift+wheel rotates preview (no zoom).</p>
+
+      <h2 id="rts">RTS pawn (<code>ATheHouseCameraPawn</code>)</h2>
+      <p>Spring arm + camera + <code>UFloatingPawnMovement</code>. RTS pitch lives on <code>RTSArmPitchDegrees</code> (boom). Occlusion fade via <code>CheckCameraOcclusion</code>.</p>
+
+      <h2 id="fps">FPS character</h2>
+      <p><code>ATheHouseFPSCharacter</code>: <code>ACharacter</code> + <code>ITheHouseSelectable</code>. <code>bCanBeSelected</code> toggles RTS selection.</p>
+
+      <h2 id="hud">HUD</h2>
+      <p><code>ATheHouseHUD</code> draws the box. Actor picking for selection is in the PlayerController.</p>
+
+      <h2 id="object"><code>ATheHouseObject</code></h2>
+      <ul>
+        <li><strong>Exclusion zone:</strong> <code>PlacementExclusionHalfExtent</code>, <code>PlacementExclusionCenterOffset</code> — blocks overlap with other <code>ATheHouseObject</code>.</li>
+        <li><strong>Visualizer:</strong> preview mesh (often engine cube), no collision.</li>
+        <li><strong>States:</strong> <code>EObjectPlacementState</code> (Valid, OverlapsObject, OverlapsWorld, OverlapsGrid).</li>
+        <li><strong>NPCs:</strong> <code>FTheHouseNPCInteractionSlot</code> (socket + <code>PurposeTag</code>), reserve / release.</li>
+        <li><strong>Selection:</strong> highlight (Custom Depth / stencil).</li>
+      </ul>
+
+      <h2 id="placement">Placement & grid</h2>
+      <p>Trace under cursor; floor normal Z ≥ <code>MinUpNormalZ</code>; optional XY snap. <code>EvaluatePlacementAt</code> checks objects + world. <code>OccupiedGridCells</code> tracks grid cells. <code>ConfirmPlacement</code> finalizes and marks cells.</p>
+      <p>Console: <code>TheHouse.Placement.Debug</code> for verbose logs.</p>
+
+      <h2 id="selectable"><code>ITheHouseSelectable</code></h2>
+      <p><code>OnSelect</code>, <code>OnDeselect</code>, <code>IsSelectable</code>. Used by objects, FPS, and compatible Blueprint actors.</p>
+
+      <h2 id="ai">AI — <code>UTheHouseObjectSlotUserComponent</code></h2>
+      <p>States: Idle, MovingToSlot, Aligned, PlayingMontage. <code>UseObjectSlot</code> reserves by tag, MoveTo via AIController, interpolated align, optional montage.</p>
+
+      <h2 id="debug">Debug</h2>
+      <table>
+        <thead><tr><th>CVar</th><th>Effect</th></tr></thead>
+        <tbody>
+          <tr><td><code>TheHouse.Placement.Debug</code></td><td>Placement logs (0/1).</td></tr>
+          <tr><td><code>TheHouse.FPS.Debug</code></td><td>Forward trace / mesh logs in FPS.</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="pitfalls">Common pitfalls</h2>
+      <ol>
+        <li>Blueprint game mode with wrong Player Controller (C++ fixes it — align BP anyway).</li>
+        <li>Enhanced Input re-enabled in <code>DefaultInput.ini</code> while the plugin is off.</li>
+        <li>Blueprint Event Tick without Parent on PC / Pawn.</li>
+        <li>Second mouse-wheel path alongside GameViewportClient → double zoom.</li>
+        <li>Steep surfaces or no hit under cursor → invalid placement.</li>
+      </ol>
+
+      <h2 id="refs">References</h2>
+      <ul>
+        <li><code>Docs/README.md</code> — Features / Changelog index</li>
+        <li><code>Docs/Features/CasinoPlaceableObjects/README.md</code></li>
+        <li><code>Docs/Features/SmartWall/README.md</code></li>
+        <li><code>Docs/Changelog/CHANGELOG.md</code></li>
+      </ul>
+    </main>
+  </div>
+  <script src="../js/doc-nav.js" defer></script>
+</body>
+</html>

@@ -2,13 +2,17 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Containers/Map.h"
 #include "TheHouseSelectable.h"
 #include "TheHouseObject.generated.h"
 
 class UPrimitiveComponent;
+class UMeshComponent;
 class UStaticMeshComponent;
 class UStaticMesh;
 class UMaterialInterface;
+class APawn;
+class UWorld;
 
 /**
  * Slot PNJ : socket sur le mesh + tag d’usage (pour choisir le montage / la logique en Blueprint).
@@ -25,6 +29,15 @@ struct FTheHouseNPCInteractionSlot
 	/** Tag libre : Sit, Deal, Play, etc. — utilisé par le PNJ / Behavior pour l’animation. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "NPC")
 	FName PurposeTag;
+};
+
+UENUM(BlueprintType)
+enum class EObjectPlacementState : uint8
+{
+	Valid,
+	OverlapsObject,
+	OverlapsWorld,
+	OverlapsGrid
 };
 
 /**
@@ -50,9 +63,20 @@ protected:
 
 public:
 	// --- Zone d’exclusion (vert sur ton schéma) : plus grande que le mesh, peut être décalée (ex. place devant) ---
+
+	/** Mesh principal de l'objet (celui que tu règles dans le BP). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Casino|Object", meta=(AllowPrivateAccess="true"))
+	UStaticMeshComponent* ObjectMesh = nullptr;
+
 	/** Demi-tailles locales de la zone où aucun autre ATheHouseObject ne peut être posé. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Casino|Placement|Exclusion zone", meta = (ClampMin = "1.0"))
 	FVector PlacementExclusionHalfExtent = FVector(200.f, 160.f, 4.f);
+
+	UPROPERTY(EditAnywhere, Category = "Casino|Placement|Exclusion zone")
+	UMaterialInterface* ValidPlacementMaterial;
+
+	UPROPERTY(EditAnywhere, Category = "Casino|Placement|Exclusion zone")
+	UMaterialInterface* InvalidPlacementMaterial;
 
 	/**
 	 * Décalage du centre de cette zone par rapport à l’origine de l’acteur (local).
@@ -90,6 +114,18 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Casino|Placement")
 	FBox GetWorldPlacementExclusionBox() const;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Casino|Placement")
+	EObjectPlacementState PlacementState = EObjectPlacementState::Valid;
+
+	UFUNCTION(BlueprintCallable, Category = "Casino|Placement")
+	bool EvaluatePlacementAt(const FTransform& WorldTransform);
+
+	UFUNCTION(BlueprintCallable, Category = "Casino|Placement")
+	void UpdatePlacementVisual();
+
+	UFUNCTION(BlueprintCallable, Category = "Casino|Placement")
+	bool SetPlacementTransform(const FTransform& Transform);
+
 	/** Ancien nom — même chose que GetWorldPlacementExclusionBox (compat). */
 	UFUNCTION(BlueprintPure, Category = "Casino|Placement", meta = (DeprecatedFunction, DeprecationMessage = "Use GetWorldPlacementExclusionBox"))
 	FBox GetWorldFootprintBox() const { return GetWorldPlacementExclusionBox(); }
@@ -99,6 +135,12 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Casino|Placement")
 	bool TestFootprintOverlapsOthersAt(const FTransform& WorldTransform, AActor* IgnoreActor = nullptr) const;
+
+	UFUNCTION(BlueprintCallable, Category = "Casino|Placement")
+	bool TestFootprintOverlapsWorldAt(const FTransform& WorldTransform) const;
+
+	/** Ignore actor (typically the floor/landscape under cursor) for world overlap checks. */
+	void SetPlacementWorldIgnoreActor(AActor* Actor) { PlacementWorldIgnoreActor = Actor; }
 
 	/** Met à jour mesh / scale du visualiseur (appelé en construction et quand tu changes les tailles en BP). */
 	UFUNCTION(BlueprintCallable, Category = "Casino|Placement")
@@ -128,6 +170,26 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Casino|NPC")
 	TArray<FTheHouseNPCInteractionSlot> NPCInteractionSlots;
 
+	/** Tente de réserver un slot libre correspondant au tag. */
+	UFUNCTION(BlueprintCallable, Category="Casino|NPC")
+	bool TryReserveNPCSlot(APawn* RequestingPawn, FName PurposeTag, int32& OutSlotIndex, FTransform& OutSlotWorldTransform);
+
+	/** Libère un slot (par index). */
+	UFUNCTION(BlueprintCallable, Category="Casino|NPC")
+	bool ReleaseNPCSlotByIndex(int32 SlotIndex, APawn* ReleasingPawn);
+
+	/** Libère tous les slots occupés par ce pawn. */
+	UFUNCTION(BlueprintCallable, Category="Casino|NPC")
+	int32 ReleaseAllNPCSlotsForPawn(APawn* ReleasingPawn);
+
+	/** Renvoie le transform monde d'un slot (socket du mesh principal si dispo). */
+	UFUNCTION(BlueprintCallable, Category="Casino|NPC")
+	bool GetNPCSlotWorldTransform(int32 SlotIndex, FTransform& OutSlotWorldTransform) const;
+
+	/** Occupant actuel du slot (null si libre). */
+	UFUNCTION(BlueprintPure, Category="Casino|NPC")
+	APawn* GetNPCSlotOccupant(int32 SlotIndex) const;
+
 	// --- ITheHouseSelectable ---
 	virtual void OnSelect() override;
 	virtual void OnDeselect() override;
@@ -137,7 +199,56 @@ protected:
 	void ApplyHighlightToRenderers(bool bOn);
 	void ApplyExclusionZoneMaterial();
 	bool ShouldSkipHighlightOnPrimitive(UPrimitiveComponent* Prim) const;
+	void ApplyPreviewCollisionAndRendering(bool bEnablePreview);
+	void CacheOriginalMaterialsIfNeeded();
+	void RestoreOriginalMaterials();
+	void ApplyPlacementMaterialToRenderers(UMaterialInterface* MaterialOverride);
 
 	UPROPERTY(Transient)
 	bool bHighlighted = false;
+
+public:
+
+	// --- Preview / placement workflow ---
+	UFUNCTION(BlueprintCallable, Category="Casino|Placement")
+	void SetAsPreview(bool bIsPreview);
+
+	UFUNCTION(BlueprintPure, Category="Casino|Placement")
+	bool IsPlacementPreviewActor() const { return bIsPreview; }
+
+	UFUNCTION(BlueprintCallable, Category="Casino|Placement")
+	bool IsPlacementValid() const { return bPlacementValid; }
+
+	/** Force un état de placement (ex: invalid grid/surface) + met à jour le visuel. */
+	UFUNCTION(BlueprintCallable, Category="Casino|Placement")
+	void SetPlacementState(EObjectPlacementState NewState);
+
+	UFUNCTION(BlueprintCallable, Category="Casino|Placement")
+	void SetPlacementValid(bool bValid);
+
+	UFUNCTION(BlueprintCallable, Category="Casino|Placement")
+	void FinalizePlacement();
+
+	// UFUNCTION(BlueprintCallable, Category="Casino|Placement")
+	// bool SetPlacementTransform(const FTransform& Transform);
+
+protected:
+
+	UPROPERTY(VisibleAnywhere, Category="Casino|Placement")
+	bool bIsPreview = false;
+
+	UPROPERTY(VisibleAnywhere, Category="Casino|Placement")
+	bool bPlacementValid = true;
+
+	// Cache runtime-only (not reflected).
+	// Keep it simple: raw pointers, owned elsewhere by the Actor/components.
+	TMap<UMeshComponent*, TArray<UMaterialInterface*>> CachedOriginalMaterials;
+
+	/** Runtime-only: actor to ignore during world overlap test (floor under cursor). */
+	UPROPERTY(Transient)
+	TObjectPtr<AActor> PlacementWorldIgnoreActor = nullptr;
+
+	/** Runtime-only: slot occupants aligned with NPCInteractionSlots. */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<APawn>> NPCSlotOccupants;
 };

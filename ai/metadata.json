@@ -1,0 +1,8 @@
+{
+    "RTS": ["Source/RTS", "Blueprints/RTS"],
+    "FPS": ["Source/FPS", "Blueprints/FPS"],
+    "Economy": ["Source/Economy"],
+    "NPC": ["Source/NPC"],
+    "UI": ["Source/UI"],
+    "Docs": ["docs"]
+}

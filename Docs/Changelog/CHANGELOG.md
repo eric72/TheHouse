@@ -8,6 +8,7 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/). Les
 
 ### Documentation
 
+- Guide développeur C++ bilingue : `Docs/Developer/GUIDE_FR.md`, `Docs/Developer/GUIDE_EN.md`, index `Docs/Developer/README.md` ; site statique `Docs/site/` (navigation + sélecteur de langue en bas à droite).
 - Structure `Docs/` : `Features/<Nom>/README.md` par fonctionnalité, `Changelog/CHANGELOG.md` pour les mises à jour.
 - Déplacement de la doc « objets casino » vers `Docs/Features/CasinoPlaceableObjects/README.md`.
 - Ajout de la doc **SmartWall** : `Docs/Features/SmartWall/README.md` (catégories BP, occlusion, `MinVisibleHeightCm`, matériau, Fill Cap expérimental, mesh pivot `SM_WallPivotBottomLeft.obj`).

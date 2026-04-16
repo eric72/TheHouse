@@ -1,6 +1,7 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "TheHousePlayerController.h"
+#include "Blueprint/UserWidget.h"
 #include "Components/InputComponent.h"
 #include "Engine/GameViewportClient.h"
 #include "Engine/LocalPlayer.h"
@@ -10,11 +11,21 @@
 #include "GameFramework/PlayerInput.h"
 #include "InputCoreTypes.h"
 #include "Kismet/GameplayStatics.h"
+#include "TheHouseObject.h"
+#include "UI/TheHouseFPSHudWidget.h"
+#include "UI/TheHouseRTSContextMenuWidget.h"
+#include "UI/TheHouseRTSMainWidget.h"
+#include "UI/TheHouseRTSUITypes.h"
 #include "TheHouse/Core/TheHouseHUD.h"
 #include "TheHouse/Core/TheHouseSelectable.h"
 #include "TheHouseCameraPawn.h"
 #include "TheHouseFPSCharacter.h"
 #include "TimerManager.h"
+#include "HAL/IConsoleManager.h"
+#include "Components/StaticMeshComponent.h"
+#include "Components/PrimitiveComponent.h"
+#include "Engine/World.h"
+#include "CollisionQueryParams.h"
 
 
 namespace {
@@ -27,6 +38,34 @@ namespace {
 	}
 	}
 } // namespace
+
+namespace TheHousePlacementDebug
+{
+	static TAutoConsoleVariable<int32> CVarPlacementDebug(
+		TEXT("TheHouse.Placement.Debug"),
+		0,
+		TEXT("0=off, 1=logs for placement flow"),
+		ECVF_Default);
+
+	static bool IsEnabled()
+	{
+		return CVarPlacementDebug.GetValueOnGameThread() != 0;
+	}
+}
+
+namespace TheHouseFPSDebug
+{
+	static TAutoConsoleVariable<int32> CVarFPSDebug(
+		TEXT("TheHouse.FPS.Debug"),
+		0,
+		TEXT("0=off, 1=log what the FPS camera is inside/looking at"),
+		ECVF_Default);
+
+	static bool IsEnabled()
+	{
+		return CVarFPSDebug.GetValueOnGameThread() != 0;
+	}
+}
 
 namespace TheHouseInputPoll {
 /** PlayerInput::IsPressed peut rester faux (Enhanced Input / focus Slate) ; la
@@ -77,10 +116,80 @@ float PollMoveRight(const APlayerController *PC) {
 }
 } // namespace TheHouseInputPoll
 
+namespace TheHouseInputActions
+{
+	static const FName RTSZoomModifier(TEXT("TheHouseRTSZoomModifier"));
+	static const FName PlacementRotateModifier(TEXT("TheHousePlacementRotateModifier"));
+}
+
+bool ATheHousePlayerController::IsRtsZoomMouseModifierHeld() const
+{
+	if (PlayerInput)
+	{
+		const TArray<FInputActionKeyMapping>& Maps = PlayerInput->GetKeysForAction(TheHouseInputActions::RTSZoomModifier);
+		for (const FInputActionKeyMapping& M : Maps)
+		{
+			if (M.Key.IsValid() && TheHouseInputPoll::IsKeyPhysicallyDown(this, M.Key))
+			{
+				return true;
+			}
+		}
+	}
+
+	// Toujours autoriser Shift physique : avec EnhancedPlayerInput, GetKeysForAction peut
+	// lister des touches sans que IsKeyPhysicallyDown les voie comme les mêmes FKey.
+	return TheHouseInputPoll::IsKeyPhysicallyDown(this, EKeys::LeftShift) ||
+		   TheHouseInputPoll::IsKeyPhysicallyDown(this, EKeys::RightShift);
+}
+
+bool ATheHousePlayerController::IsPlacementRotateModifierHeld() const
+{
+	if (PlayerInput)
+	{
+		const TArray<FInputActionKeyMapping>& Maps =
+			PlayerInput->GetKeysForAction(TheHouseInputActions::PlacementRotateModifier);
+		for (const FInputActionKeyMapping& M : Maps)
+		{
+			if (M.Key.IsValid() && TheHouseInputPoll::IsKeyPhysicallyDown(this, M.Key))
+			{
+				return true;
+			}
+		}
+	}
+
+	return TheHouseInputPoll::IsKeyPhysicallyDown(this, EKeys::LeftControl) ||
+		   TheHouseInputPoll::IsKeyPhysicallyDown(this, EKeys::RightControl);
+}
+
 void ATheHousePlayerController::TheHouse_ApplyWheelZoom(float WheelDelta) {
   if (FMath::IsNearlyZero(WheelDelta)) {
     return;
   }
+
+  const bool bShiftMod = IsRtsZoomMouseModifierHeld();
+  const bool bCtrlPivotMod = IsPlacementRotateModifierHeld();
+
+  // Molette via GameViewportClient : pivot du preview avec **TheHouseRTSZoomModifier** (Shift)
+  // ou **TheHousePlacementRotateModifier** (Ctrl). Shift désactive le zoom caméra.
+  if (PlacementState == EPlacementState::Previewing && GetPawn() == RTSPawnReference &&
+      PreviewActor && (bShiftMod || bCtrlPivotMod))
+  {
+    const float Step = FMath::Clamp(PlacementRotationStepDegrees, 1.f, 180.f);
+    const float Sign = FMath::Sign(WheelDelta);
+    if (!FMath::IsNearlyZero(Sign))
+    {
+      PlacementPreviewYawDegrees =
+          FMath::UnwindDegrees(PlacementPreviewYawDegrees + Sign * Step);
+      UpdatePlacementPreview();
+    }
+    return;
+  }
+
+  // Zoom RTS : molette seule (sans Shift). Shift = pas de zoom (réservé au pivot en preview).
+  if (bShiftMod) {
+    return;
+  }
+
   // Valeur passée à Zoom() : NewLength += Value * RTSZoomSpeed * (-1). Souris
   // haute précision : |WheelDelta| très petit.
   float V = WheelDelta * RTSWheelZoomMultiplier;
@@ -133,7 +242,10 @@ void ATheHousePlayerController::BeginPlay() {
 	}
 
 	if (IsValid(RTSPawnReference) && RTSPawnReference->CameraBoom) {
-		TargetZoomLength = RTSPawnReference->CameraBoom->TargetArmLength;
+		const float MinL = FMath::Max(200.f, RTSCameraMinArmLength);
+		const float MaxL = FMath::Max(MinL + 1.f, RTSCameraMaxArmLength);
+		TargetZoomLength = FMath::Clamp(
+			RTSPawnReference->CameraBoom->TargetArmLength, MinL, MaxL);
 	}
 
 	// RTS : yaw sur le contrôleur ; pitch sur le spring arm (voir
@@ -180,6 +292,9 @@ void ATheHousePlayerController::BeginPlay() {
 	#endif
 
 	TheHouse_StartInputPollTimer();
+
+	EnsureDefaultRTSContextMenuDefs();
+	InitializeModeWidgets();
 }
 
 void ATheHousePlayerController::ReceivedPlayer() {
@@ -209,6 +324,19 @@ void ATheHousePlayerController::EndPlay(
   if (GetWorld()) {
     GetWorldTimerManager().ClearTimer(TheHouseInputPollTimer);
   }
+
+  CloseRTSContextMenu();
+  if (RTSMainWidgetInstance)
+  {
+    RTSMainWidgetInstance->RemoveFromParent();
+    RTSMainWidgetInstance = nullptr;
+  }
+  if (FPSHudWidgetInstance)
+  {
+    FPSHudWidgetInstance->RemoveFromParent();
+    FPSHudWidgetInstance = nullptr;
+  }
+
   Super::EndPlay(EndPlayReason);
 }
 
@@ -227,11 +355,16 @@ void ATheHousePlayerController::OnPossess(APawn *InPawn) {
   if (ATheHouseCameraPawn *Cam = Cast<ATheHouseCameraPawn>(InPawn)) {
     RTSPawnReference = Cam;
     if (Cam->CameraBoom) {
-      TargetZoomLength = Cam->CameraBoom->TargetArmLength;
+      const float MinL = FMath::Max(200.f, RTSCameraMinArmLength);
+      const float MaxL = FMath::Max(MinL + 1.f, RTSCameraMaxArmLength);
+      TargetZoomLength =
+          FMath::Clamp(Cam->CameraBoom->TargetArmLength, MinL, MaxL);
     }
   }
 
   TheHouse_StartInputPollTimer();
+
+  UpdateModeWidgetsVisibility();
 }
 
 void ATheHousePlayerController::Tick(float DeltaTime) {
@@ -306,6 +439,11 @@ void ATheHousePlayerController::Tick(float DeltaTime) {
       }
     }
   }
+
+  // if (IsInputKeyDown(EKeys::P))
+  // {
+  //   UE_LOG(LogTemp, Warning, TEXT("P DETECTED VIA TICK"));
+  // }
 }
 
 void ATheHousePlayerController::TheHouse_PollInputFrame() {
@@ -320,8 +458,8 @@ void ATheHousePlayerController::TheHouse_PollInputFrame() {
   // doublait ou restait à 0 selon focus / layout ; GetInputMouseDelta ignorait
   // la sensibilité moteur (0.07) → sens « bugué ».
 
-  // Zoom RTS de secours — Pavé num. + / -
-  if (Cast<ATheHouseCameraPawn>(GetPawn())) {
+  // Zoom RTS de secours — Pavé num. + / - (comme la molette : sans Shift ; Shift bloque le zoom).
+  if (Cast<ATheHouseCameraPawn>(GetPawn()) && !IsRtsZoomMouseModifierHeld()) {
     // ~8 uu de variation de bras par frame (ralenti vs ancien 15 ; indépendant
     // de RTSZoomSpeed via la formule).
     const float ZoomKeyStep = 8.f / FMath::Max(RTSZoomSpeed, 1.f);
@@ -340,6 +478,18 @@ void ATheHousePlayerController::TheHouse_PollInputFrame() {
         HUD->UpdateSelection(FVector2D(MouseX, MouseY));
       }
     }
+  }
+
+  // Menu contextuel RTS : Game+UI mange souvent InputKey avant le jeu ; front montant
+  // via l’état physique (comme mouvement) + BindAction("RTSObjectContext").
+  {
+    const bool bRMB = TheHouseInputPoll::IsKeyPhysicallyDown(this, EKeys::RightMouseButton);
+    if (!bPrevPollRMBHeld && bRMB && Cast<ATheHouseCameraPawn>(GetPawn()) == RTSPawnReference &&
+        RTSPawnReference && !IsRtsCameraRotateModifierPhysicallyDown())
+    {
+      TryOpenRTSContextMenuAtCursor();
+    }
+    bPrevPollRMBHeld = bRMB;
   }
 }
 
@@ -375,6 +525,155 @@ void ATheHousePlayerController::SetupInputComponent() {
   InputComponent->BindAction(
       "RotateModifier", IE_Released, this,
       &ATheHousePlayerController::OnRotateModifierReleased);
+
+  InputComponent->BindAction(
+    "DebugPlaceObject",
+    IE_Pressed,
+    this,
+    &ATheHousePlayerController::DebugStartPlacement
+  );
+
+  // Selection / confirmation (Left click). If we are in placement preview,
+  // clicking confirms instead of selecting.
+  InputComponent->BindAction("Select", IE_Pressed, this,
+                             &ATheHousePlayerController::Input_SelectPressed);
+  InputComponent->BindAction("Select", IE_Released, this,
+                             &ATheHousePlayerController::Input_SelectReleased);
+
+  InputComponent->BindAction(
+      "CancelOrCloseRts",
+      IE_Pressed,
+      this,
+      &ATheHousePlayerController::Input_CancelOrCloseRts);
+
+  InputComponent->BindAction(
+      "RTSObjectContext",
+      IE_Pressed,
+      this,
+      &ATheHousePlayerController::Input_RTSObjectContext);
+}
+
+void ATheHousePlayerController::DebugStartPlacement()
+{
+	// Placement is RTS-only.
+	if (!RTSPawnReference || GetPawn() != RTSPawnReference)
+	{
+		return;
+	}
+
+	// Toggle: pressing P again cancels current preview.
+	if (PlacementState == EPlacementState::Previewing)
+	{
+		if (TheHousePlacementDebug::IsEnabled())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Placement] P pressed: cancel preview"));
+		}
+		CancelPlacement();
+		return;
+	}
+
+	if (PlacementState != EPlacementState::None)
+	{
+		if (TheHousePlacementDebug::IsEnabled())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Placement] P pressed but state != None (%d)"), (int32)PlacementState);
+		}
+		return;
+	}
+
+	if (!PendingPlacementClass)
+	{
+		if (TheHousePlacementDebug::IsEnabled())
+		{
+			UE_LOG(LogTemp, Error, TEXT("[Placement] PendingPlacementClass is NULL"));
+		}
+		return;
+	}
+
+	SpawnPlacementPreviewFromPendingClass();
+}
+
+void ATheHousePlayerController::CancelPlacement()
+{
+	if (PreviewActor)
+	{
+		PreviewActor->Destroy();
+		PreviewActor = nullptr;
+	}
+	PlacementState = EPlacementState::None;
+	PlacementPreviewYawDegrees = 0.f;
+	PendingStockConsumeIndex = INDEX_NONE;
+}
+
+void ATheHousePlayerController::SpawnPlacementPreviewFromPendingClass()
+{
+	if (!GetWorld() || !PendingPlacementClass)
+	{
+		return;
+	}
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride =
+		ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	PreviewActor = GetWorld()->SpawnActor<ATheHouseObject>(
+		PendingPlacementClass,
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
+		Params
+	);
+
+	if (!PreviewActor)
+	{
+		if (TheHousePlacementDebug::IsEnabled())
+		{
+			UE_LOG(LogTemp, Error, TEXT("[Placement] Spawn preview FAILED (class=%s)"),
+				*PendingPlacementClass->GetPathName());
+		}
+		return;
+	}
+
+	if (TheHousePlacementDebug::IsEnabled())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Placement] Spawned preview=%s class=%s"),
+			*PreviewActor->GetName(),
+			*PendingPlacementClass->GetPathName());
+	}
+
+	PlacementPreviewYawDegrees = 0.f;
+	PreviewActor->SetAsPreview(true);
+
+	PlacementState = EPlacementState::Previewing;
+}
+
+void ATheHousePlayerController::StartPlacementPreviewForClass(TSubclassOf<ATheHouseObject> InClass)
+{
+	if (!RTSPawnReference || GetPawn() != RTSPawnReference)
+	{
+		return;
+	}
+	if (!InClass)
+	{
+		return;
+	}
+
+	PendingStockConsumeIndex = INDEX_NONE;
+	PendingPlacementClass = InClass;
+	CancelPlacement();
+	SpawnPlacementPreviewFromPendingClass();
+}
+
+void ATheHousePlayerController::ConsumeStoredPlaceableAndBeginPreview(int32 StoredIndex)
+{
+	if (!StoredPlaceables.IsValidIndex(StoredIndex))
+	{
+		return;
+	}
+
+	PendingPlacementClass = StoredPlaceables[StoredIndex];
+	CancelPlacement();
+	PendingStockConsumeIndex = StoredIndex;
+	SpawnPlacementPreviewFromPendingClass();
 }
 
 #pragma endregion
@@ -383,6 +682,14 @@ void ATheHousePlayerController::SetupInputComponent() {
 
 void ATheHousePlayerController::OnRotateModifierPressed() {
   bIsRotateModifierDown = true;
+
+  // If the user starts rotating the camera, cancel any ongoing selection box.
+  if (bIsSelecting) {
+    bIsSelecting = false;
+    if (ATheHouseHUD *HUD = Cast<ATheHouseHUD>(GetHUD())) {
+      HUD->StopSelection();
+    }
+  }
 
   // In RTS Mode, HIDE cursor and LOCK it to allow infinite scrolling/rotation
   // without hitting edge
@@ -475,8 +782,10 @@ void ATheHousePlayerController::Zoom(float Value) {
     // perçue.
     ScaledValue *= FMath::Clamp(OldLength / RTSZoomArmLengthRef, 0.5f, 6.f);
   }
-  const float NewLength = FMath::Clamp(
-      OldLength + (ScaledValue * RTSZoomSpeed * -1.f), 200.f, 4000.f);
+  const float MinL = FMath::Max(200.f, RTSCameraMinArmLength);
+  const float MaxL = FMath::Max(MinL + 1.f, RTSCameraMaxArmLength);
+  const float NewLength =
+      FMath::Clamp(OldLength + (ScaledValue * RTSZoomSpeed * -1.f), MinL, MaxL);
   TargetZoomLength = NewLength;
   if (RTSZoomInterpSpeed <= KINDA_SMALL_NUMBER) {
     Cam->CameraBoom->TargetArmLength = NewLength;
@@ -523,6 +832,36 @@ void ATheHousePlayerController::Zoom(float Value) {
       Cam->AddActorWorldOffset(Pan);
     }
   }
+
+  ClampRtsPawnAboveGround(Cam);
+}
+
+void ATheHousePlayerController::ClampRtsPawnAboveGround(ATheHouseCameraPawn* Cam)
+{
+	if (!Cam || !GetWorld())
+	{
+		return;
+	}
+
+	FVector Loc = Cam->GetActorLocation();
+	const FVector TraceStart = Loc + FVector(0.f, 0.f, 6000.f);
+	const FVector TraceEnd = Loc - FVector(0.f, 0.f, 200000.f);
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(TheHouseRTSPawnGroundClamp), false);
+	Params.AddIgnoredActor(Cam);
+
+	FHitResult Hit;
+	if (!GetWorld()->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_Visibility, Params) || !Hit.bBlockingHit)
+	{
+		return;
+	}
+
+	const float MinZ = Hit.ImpactPoint.Z + RTSPawnMinClearanceAboveGroundUU;
+	if (Loc.Z < MinZ)
+	{
+		Loc.Z = MinZ;
+		Cam->SetActorLocation(Loc);
+	}
 }
 
 void ATheHousePlayerController::RotateCamera(float Value) {
@@ -565,6 +904,9 @@ void ATheHousePlayerController::SwitchToRTS() {
     return;
   }
 
+  // Placement preview is RTS-only.
+  CancelPlacement();
+
   // 1. Sync RTS Camera to FPS position — seulement si la position FPS est
   // raisonnable (< 2000 uu de haut) pour éviter la cascade de hauteur.
   if (IsValid(ActiveFPSCharacter)) {
@@ -601,6 +943,9 @@ void ATheHousePlayerController::SwitchToRTS() {
   InputMode.SetHideCursorDuringCapture(false);
   SetInputMode(InputMode);
   TheHouse_FocusKeyboardOnGameViewport();
+
+  CloseRTSContextMenu();
+  UpdateModeWidgetsVisibility();
 }
 
 void ATheHousePlayerController::SwitchToFPS(FVector TargetLocation, FRotator TargetRotation) {
@@ -608,11 +953,14 @@ void ATheHousePlayerController::SwitchToFPS(FVector TargetLocation, FRotator Tar
 		FPSCharacterClass = ATheHouseFPSCharacter::StaticClass();
 	}
 
+	// Placement preview is RTS-only.
+	CancelPlacement();
+	CloseRTSContextMenu();
+
 	// TargetLocation est déjà le sol réel fourni par DebugSwitchToFPS
 	// (via GetHitResultUnderCursor). On ajoute juste la demi-hauteur capsule.
 	constexpr float CapsuleHalfHeight = 196.f;
-	// const FVector FPSSpawnLoc = TargetLocation + FVector(0.f, 0.f, CapsuleHalfHeight);
-	const FVector FPSSpawnLoc = TargetLocation + FVector(152.f, 122.f, CapsuleHalfHeight);
+	const FVector FPSSpawnLoc = TargetLocation + FVector(0.f, 0.f, CapsuleHalfHeight);
 
 	#if !UE_BUILD_SHIPPING
 		UE_LOG(LogTemp, Warning, TEXT("[TheHouse] SwitchToFPS | ImpactZ=%.0f -> SpawnZ=%.0f"), TargetLocation.Z, FPSSpawnLoc.Z);
@@ -630,6 +978,36 @@ void ATheHousePlayerController::SwitchToFPS(FVector TargetLocation, FRotator Tar
 	if (ActiveFPSCharacter) {
 		Possess(ActiveFPSCharacter);
 		SetIgnoreMoveInput(false);
+
+		// Hide debug/test cube components on the FPS pawn (prevents a giant cube in front of camera).
+		// If you actually want a visible mesh on the FPS pawn, rename it or add tag "KeepVisibleInFPS".
+		{
+			TArray<UStaticMeshComponent*> MeshComps;
+			ActiveFPSCharacter->GetComponents<UStaticMeshComponent>(MeshComps);
+			for (UStaticMeshComponent* C : MeshComps)
+			{
+				if (!C)
+				{
+					continue;
+				}
+				if (C->ComponentHasTag(TEXT("KeepVisibleInFPS")))
+				{
+					continue;
+				}
+
+				const bool bLooksLikeTestCube =
+					C->GetName().Equals(TEXT("Cube"), ESearchCase::IgnoreCase) ||
+					(C->GetStaticMesh() && C->GetStaticMesh()->GetName().Equals(TEXT("Cube"), ESearchCase::IgnoreCase));
+
+				if (bLooksLikeTestCube)
+				{
+					C->SetVisibility(false, true);
+					C->SetHiddenInGame(true, true);
+					C->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+					C->SetGenerateOverlapEvents(false);
+				}
+			}
+		}
 
 		// Gravité : ACharacter::Restart() (appelé par Possess) réinitialise le
 		// MovementMode. On la force 0.1s plus tard, après que Restart() soit terminé,
@@ -654,6 +1032,8 @@ void ATheHousePlayerController::SwitchToFPS(FVector TargetLocation, FRotator Tar
 	} else {
 		UE_LOG(LogTemp, Error, TEXT("[TheHouse] SwitchToFPS | SpawnActor nullptr !"));
 	}
+
+	UpdateModeWidgetsVisibility();
 }
 
 
@@ -676,7 +1056,7 @@ void ATheHousePlayerController::DebugSwitchToFPS() {
   // On n'utilise PAS de trace verticale depuis une hauteur fixe car cela
   // frappe la skybox ou d'autres géométries hautes.
   // -------------------------------------------------------------------
-  FVector SpawnGroundPoint;
+  FVector SpawnGroundPoint = FVector::ZeroVector;
   bool bGotFloor = false;
 
   {
@@ -715,10 +1095,11 @@ void ATheHousePlayerController::DebugSwitchToFPS() {
   }
 
 	#if !UE_BUILD_SHIPPING
-	UE_LOG(LogTemp, Warning,
-			TEXT("[TheHouse] DebugSwitchToFPS | GroundZ=%.0f | OK=%s"),
-			SpawnGroundPoint.Z, bGotFloor ? TEXT("oui") : TEXT("fallback"));
-	#endif
+    UE_LOG(LogTemp, Warning,
+        TEXT("[TheHouse] DebugSwitchToFPS | GroundZ=%.0f | OK=%s"),
+        SpawnGroundPoint.Z,
+        bGotFloor ? TEXT("oui") : TEXT("fallback"));
+    #endif
 
   const FRotator SpawnRot(0.f, GetControlRotation().Yaw, 0.f);
   SwitchToFPS(SpawnGroundPoint, SpawnRot);
@@ -726,6 +1107,15 @@ void ATheHousePlayerController::DebugSwitchToFPS() {
 
 
 void ATheHousePlayerController::Input_SelectPressed() {
+  // While rotating (ALT / RMB), left click should not start selection nor confirm placement.
+  if (bIsRotateModifierDown) {
+    return;
+  }
+
+  if (PlacementState == EPlacementState::Previewing) {
+    ConfirmPlacement();
+    return;
+  }
   if (!RTSPawnReference || GetPawn() != RTSPawnReference)
     return;
 
@@ -743,6 +1133,11 @@ void ATheHousePlayerController::Input_SelectPressed() {
 }
 
 void ATheHousePlayerController::Input_SelectReleased() {
+  // While rotating (ALT / RMB), ignore selection release too.
+  if (bIsRotateModifierDown) {
+    return;
+  }
+
   bIsSelecting = false;
 
   // Notify HUD to stop drawing
@@ -812,4 +1207,744 @@ void ATheHousePlayerController::Input_SelectReleased() {
   }
 }
 
+
+// Object placemet on the map
+
+void ATheHousePlayerController::PlayerTick(float DeltaTime)
+{
+    Super::PlayerTick(DeltaTime);
+
+    const bool bIsInRTSPlacementContext = (GetPawn() == RTSPawnReference);
+
+    // Placement rotation : géré dans TheHouse_ApplyWheelZoom (molette interceptée par le viewport).
+
+    if (bIsInRTSPlacementContext && PlacementState == EPlacementState::Previewing && PreviewActor)
+    {
+      UpdatePlacementPreview();
+    }
+
+    // Fallback confirm: independent of ActionMappings/EnhancedInput quirks.
+    // If we're previewing and the user left-clicks (without rotate modifier), confirm placement.
+    if (bIsInRTSPlacementContext && PlacementState == EPlacementState::Previewing && PreviewActor && !bIsRotateModifierDown)
+    {
+      if (WasInputKeyJustPressed(EKeys::LeftMouseButton))
+      {
+        ConfirmPlacement();
+      }
+    }
+
+    // FPS debug: identify the big cube / blocking actor in front of camera.
+    if (TheHouseFPSDebug::IsEnabled() && GetPawn() && GetPawn() != RTSPawnReference)
+    {
+      static double LastLogTimeSeconds = 0.0;
+      const double Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
+      if (Now - LastLogTimeSeconds > 0.75)
+      {
+        LastLogTimeSeconds = Now;
+
+        FVector CamLoc;
+        FRotator CamRot;
+        GetPlayerViewPoint(CamLoc, CamRot);
+
+        FHitResult Hit;
+        const FVector End = CamLoc + CamRot.Vector() * 250.f;
+        FCollisionQueryParams Params(SCENE_QUERY_STAT(FPSDebugTrace), true);
+        Params.AddIgnoredActor(GetPawn());
+
+        if (GetWorld() && GetWorld()->LineTraceSingleByChannel(Hit, CamLoc, End, ECC_Visibility, Params) && Hit.bBlockingHit)
+        {
+          UE_LOG(LogTemp, Warning, TEXT("[FPSDebug] Hit actor=%s comp=%s dist=%.1f loc=%s"),
+            Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("null"),
+            Hit.GetComponent() ? *Hit.GetComponent()->GetName() : TEXT("null"),
+            Hit.Distance,
+            *Hit.ImpactPoint.ToString());
+        }
+        else
+        {
+          UE_LOG(LogTemp, Warning, TEXT("[FPSDebug] No hit ahead. Pawn=%s CamLoc=%s"), *GetPawn()->GetName(), *CamLoc.ToString());
+        }
+
+        // If we're inside geometry, a forward line trace can miss depending on collision settings.
+        // Do a tiny sweep at the camera to list blocking components around us.
+        if (GetWorld())
+        {
+          TArray<FHitResult> SweepHits;
+          const FCollisionShape Shape = FCollisionShape::MakeSphere(12.f);
+          const bool bAnySweep = GetWorld()->SweepMultiByChannel(
+            SweepHits,
+            CamLoc,
+            CamLoc,
+            FQuat::Identity,
+            ECC_Visibility,
+            Shape,
+            Params
+          );
+
+          if (bAnySweep && SweepHits.Num() > 0)
+          {
+            int32 Printed = 0;
+            for (const FHitResult& H : SweepHits)
+            {
+              if (!H.bBlockingHit && !H.bStartPenetrating)
+              {
+                continue;
+              }
+              UE_LOG(LogTemp, Warning, TEXT("[FPSDebug] Sweep hit actor=%s comp=%s startPen=%s penDepth=%.2f"),
+                H.GetActor() ? *H.GetActor()->GetName() : TEXT("null"),
+                H.GetComponent() ? *H.GetComponent()->GetName() : TEXT("null"),
+                H.bStartPenetrating ? TEXT("true") : TEXT("false"),
+                H.PenetrationDepth);
+
+              if (++Printed >= 4) break;
+            }
+          }
+        }
+
+        // Log any visible StaticMeshComponents on the FPS pawn (this often reveals a "debug cube" component).
+        {
+          TArray<UStaticMeshComponent*> MeshComps;
+          GetPawn()->GetComponents<UStaticMeshComponent>(MeshComps);
+          for (UStaticMeshComponent* C : MeshComps)
+          {
+            if (!C) continue;
+            if (C->IsVisible() && !C->bHiddenInGame)
+            {
+              const FString MeshName = C->GetStaticMesh() ? C->GetStaticMesh()->GetName() : TEXT("null");
+              UE_LOG(LogTemp, Warning, TEXT("[FPSDebug] Pawn mesh comp=%s mesh=%s hiddenInGame=%s loc=%s"),
+                *C->GetName(),
+                *MeshName,
+                C->bHiddenInGame ? TEXT("true") : TEXT("false"),
+                *C->GetComponentLocation().ToString());
+            }
+          }
+        }
+
+        // Also list any visible primitives (helps if the cube is a non-static primitive).
+        {
+          TArray<UPrimitiveComponent*> PrimComps;
+          GetPawn()->GetComponents<UPrimitiveComponent>(PrimComps);
+          int32 Printed = 0;
+          for (UPrimitiveComponent* P : PrimComps)
+          {
+            if (!P) continue;
+            if (P->IsVisible() && !P->bHiddenInGame)
+            {
+              UE_LOG(LogTemp, Warning, TEXT("[FPSDebug] Pawn prim comp=%s class=%s"),
+                *P->GetName(),
+                *P->GetClass()->GetName());
+              if (++Printed >= 6) break;
+            }
+          }
+        }
+
+        if (AActor* PawnActor = GetPawn())
+        {
+          TArray<AActor*> Attached;
+          PawnActor->GetAttachedActors(Attached);
+          if (Attached.Num() > 0)
+          {
+            FString Names;
+            for (AActor* A : Attached)
+            {
+              Names += A ? (A->GetName() + TEXT(" ")) : TEXT("null ");
+            }
+            UE_LOG(LogTemp, Warning, TEXT("[FPSDebug] AttachedActors: %s"), *Names);
+          }
+        }
+      }
+    }
+}
+
+void ATheHousePlayerController::UpdatePlacementPreview()
+{
+	FVector WorldOrigin, WorldDir;
+	if (!DeprojectMousePositionToWorld(WorldOrigin, WorldDir))
+	{
+		if (TheHousePlacementDebug::IsEnabled())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Placement] DeprojectMousePositionToWorld FAILED"));
+		}
+		return;
+	}
+
+	FHitResult Hit;
+	const FVector End = WorldOrigin + WorldDir * 100000.f;
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(PlacementPreviewTrace), /*bTraceComplex*/ true);
+	Params.AddIgnoredActor(this);
+	if (RTSPawnReference)
+	{
+		Params.AddIgnoredActor(RTSPawnReference);
+	}
+	if (PreviewActor)
+	{
+		Params.AddIgnoredActor(PreviewActor);
+	}
+
+	if (GetWorld()->LineTraceSingleByChannel(Hit, WorldOrigin, End, ECC_Visibility, Params))
+	{
+		if (!Hit.bBlockingHit)
+		{
+			PreviewActor->SetPlacementState(EObjectPlacementState::OverlapsWorld);
+			if (TheHousePlacementDebug::IsEnabled())
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[Placement] Trace hit but not blocking"));
+			}
+			return;
+		}
+
+		// Reject walls/steep surfaces: placement grid is meant for floors.
+		if (!ValidatePlacement(Hit))
+		{
+			PreviewActor->SetPlacementState(EObjectPlacementState::OverlapsWorld);
+			if (TheHousePlacementDebug::IsEnabled())
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[Placement] Invalid surface normal Z=%.3f actor=%s"),
+					Hit.ImpactNormal.Z,
+					Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("null"));
+			}
+			return;
+		}
+
+		FVector Loc = Hit.ImpactPoint;
+		if (PlacementGrid.bEnableGridSnap && PlacementGrid.CellSize > KINDA_SMALL_NUMBER)
+		{
+			Loc = SnapWorldToGridXY(Loc);
+		}
+
+		// Keep Z from hit (allows terrain height), but snap XY to grid.
+		FTransform CandidateTransform = PreviewActor->GetActorTransform();
+		CandidateTransform.SetLocation(Loc);
+		CandidateTransform.SetRotation(FQuat(FRotator(0.f, PlacementPreviewYawDegrees, 0.f)));
+
+		// Ignore the surface under cursor for "world blocker" checks (so floor doesn't block placement).
+		PreviewActor->SetPlacementWorldIgnoreActor(Hit.GetActor());
+
+		// First: evaluate world collision blockers + overlaps with other objects.
+		const bool bValidByWorld = PreviewActor->EvaluatePlacementAt(CandidateTransform);
+
+		// Second: check grid occupancy footprint.
+		TArray<FIntPoint> Cells;
+		GetFootprintCellsForTransform(PreviewActor, CandidateTransform, Cells);
+		const bool bValidByGrid = !AreAnyCellsOccupied(Cells);
+
+		PreviewActor->SetActorTransform(CandidateTransform);
+		if (!bValidByWorld)
+		{
+			// EvaluatePlacementAt already set PlacementState (object/world).
+			PreviewActor->SetPlacementValid(false);
+			if (TheHousePlacementDebug::IsEnabled())
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[Placement] Invalid by world (state=%d)"), (int32)PreviewActor->PlacementState);
+			}
+		}
+		else if (!bValidByGrid)
+		{
+			PreviewActor->SetPlacementState(EObjectPlacementState::OverlapsGrid);
+			if (TheHousePlacementDebug::IsEnabled())
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[Placement] Invalid by grid (cells=%d)"), Cells.Num());
+			}
+		}
+		else
+		{
+			PreviewActor->SetPlacementState(EObjectPlacementState::Valid);
+		}
+	}
+	else if (PreviewActor)
+	{
+		// No hit under cursor => invalid placement.
+		PreviewActor->SetPlacementState(EObjectPlacementState::OverlapsWorld);
+		if (TheHousePlacementDebug::IsEnabled())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Placement] Trace: no hit under cursor"));
+		}
+	}
+}
+
+bool ATheHousePlayerController::ValidatePlacement(const FHitResult& Hit) const
+{
+	const float Threshold = FMath::Clamp(PlacementGrid.MinUpNormalZ, 0.f, 1.f);
+	return Hit.ImpactNormal.Z >= Threshold;
+}
+
+void ATheHousePlayerController::ConfirmPlacement()
+{
+	// Placement is RTS-only.
+	if (!RTSPawnReference || GetPawn() != RTSPawnReference)
+	{
+		return;
+	}
+
+	if (PlacementState != EPlacementState::Previewing || !PreviewActor)
+	{
+		if (TheHousePlacementDebug::IsEnabled())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Placement] Confirm ignored (state=%d preview=%s)"),
+				(int32)PlacementState,
+				PreviewActor ? TEXT("yes") : TEXT("no"));
+		}
+		return;
+	}
+
+	if (!PreviewActor->IsPlacementValid())
+	{
+		if (TheHousePlacementDebug::IsEnabled())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Placement] Confirm blocked: placement invalid (state=%d)"),
+				(int32)PreviewActor->PlacementState);
+		}
+		return;
+	}
+
+	// Mark grid cells as occupied (so next placements are blocked).
+	TArray<FIntPoint> Cells;
+	GetFootprintCellsForTransform(PreviewActor, PreviewActor->GetActorTransform(), Cells);
+	MarkCellsOccupied(Cells);
+
+	PreviewActor->FinalizePlacement();
+	if (TheHousePlacementDebug::IsEnabled())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Placement] Finalized placement. Cells marked=%d"), Cells.Num());
+	}
+
+	if (PendingStockConsumeIndex != INDEX_NONE && StoredPlaceables.IsValidIndex(PendingStockConsumeIndex))
+	{
+		if (PreviewActor && PreviewActor->GetClass() == StoredPlaceables[PendingStockConsumeIndex])
+		{
+			StoredPlaceables.RemoveAt(PendingStockConsumeIndex);
+		}
+	}
+	PendingStockConsumeIndex = INDEX_NONE;
+
+	PreviewActor = nullptr;
+	PlacementState = EPlacementState::None;
+
+	RefreshRTSMainWidget();
+}
+
 #pragma endregion
+
+// =========================================================
+// GRID HELPERS
+// =========================================================
+
+FVector ATheHousePlayerController::SnapWorldToGridXY(const FVector& WorldLocation) const
+{
+	const float Cell = FMath::Max(PlacementGrid.CellSize, 1.f);
+	const FVector Rel = WorldLocation - PlacementGrid.WorldOrigin;
+
+	const float X = FMath::GridSnap(Rel.X, Cell);
+	const float Y = FMath::GridSnap(Rel.Y, Cell);
+
+	return FVector(X, Y, Rel.Z) + PlacementGrid.WorldOrigin;
+}
+
+FIntPoint ATheHousePlayerController::WorldToGridCell(const FVector& WorldLocation) const
+{
+	const float Cell = FMath::Max(PlacementGrid.CellSize, 1.f);
+	const FVector Rel = WorldLocation - PlacementGrid.WorldOrigin;
+	return FIntPoint(
+		FMath::FloorToInt(Rel.X / Cell),
+		FMath::FloorToInt(Rel.Y / Cell)
+	);
+}
+
+void ATheHousePlayerController::GetFootprintCellsForTransform(const ATheHouseObject* Obj, const FTransform& WorldTransform, TArray<FIntPoint>& OutCells) const
+{
+	OutCells.Reset();
+	if (!Obj || PlacementGrid.CellSize <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
+	// Approx footprint as the object's placement exclusion box projected on XY.
+	const FBox WorldBox = Obj->GetLocalPlacementExclusionBox().TransformBy(WorldTransform);
+
+	const FVector Min = WorldBox.Min;
+	const FVector Max = WorldBox.Max;
+
+	const FIntPoint MinCell = WorldToGridCell(Min);
+	const FIntPoint MaxCell = WorldToGridCell(Max);
+
+	const int32 X0 = FMath::Min(MinCell.X, MaxCell.X);
+	const int32 X1 = FMath::Max(MinCell.X, MaxCell.X);
+	const int32 Y0 = FMath::Min(MinCell.Y, MaxCell.Y);
+	const int32 Y1 = FMath::Max(MinCell.Y, MaxCell.Y);
+
+	OutCells.Reserve((X1 - X0 + 1) * (Y1 - Y0 + 1));
+	for (int32 Y = Y0; Y <= Y1; ++Y)
+	{
+		for (int32 X = X0; X <= X1; ++X)
+		{
+			OutCells.Add(FIntPoint(X, Y));
+		}
+	}
+}
+
+bool ATheHousePlayerController::AreAnyCellsOccupied(const TArray<FIntPoint>& Cells) const
+{
+	for (const FIntPoint& Cell : Cells)
+	{
+		if (OccupiedGridCells.Contains(Cell))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void ATheHousePlayerController::MarkCellsOccupied(const TArray<FIntPoint>& Cells)
+{
+	for (const FIntPoint& Cell : Cells)
+	{
+		OccupiedGridCells.Add(Cell);
+	}
+}
+
+void ATheHousePlayerController::MarkCellsFree(const TArray<FIntPoint>& Cells)
+{
+	for (const FIntPoint& Cell : Cells)
+	{
+		OccupiedGridCells.Remove(Cell);
+	}
+}
+
+void ATheHousePlayerController::EnsureDefaultRTSContextMenuDefs()
+{
+	RTSContextMenuOptionDefs.RemoveAll([](const FTheHouseRTSContextMenuOptionDef& D) {
+		return D.OptionId.IsNone();
+	});
+
+	if (RTSContextMenuOptionDefs.Num() > 0)
+	{
+		return;
+	}
+
+	{
+		FTheHouseRTSContextMenuOptionDef D;
+		D.OptionId = TheHouseRTSContextIds::DeleteObject;
+		D.Label = NSLOCTEXT("TheHouse", "RTS_RemoveObject", "Vendre");
+		RTSContextMenuOptionDefs.Add(D);
+	}
+	{
+		FTheHouseRTSContextMenuOptionDef D;
+		D.OptionId = TheHouseRTSContextIds::StoreObject;
+		D.Label = NSLOCTEXT("TheHouse", "RTS_StoreObject", "Mettre en stock");
+		RTSContextMenuOptionDefs.Add(D);
+	}
+}
+
+void ATheHousePlayerController::InitializeModeWidgets()
+{
+	if (!RTSMainWidgetClass)
+	{
+		RTSMainWidgetClass = UTheHouseRTSMainWidget::StaticClass();
+	}
+	if (!RTSContextMenuWidgetClass)
+	{
+		RTSContextMenuWidgetClass = UTheHouseRTSContextMenuWidget::StaticClass();
+	}
+	if (!FPSHudWidgetClass)
+	{
+		FPSHudWidgetClass = UTheHouseFPSHudWidget::StaticClass();
+	}
+
+	if (RTSMainWidgetClass && !RTSMainWidgetInstance)
+	{
+		RTSMainWidgetInstance = CreateWidget<UTheHouseRTSMainWidget>(this, RTSMainWidgetClass);
+		if (RTSMainWidgetInstance)
+		{
+			RTSMainWidgetInstance->BindToPlayerController(this);
+			RTSMainWidgetInstance->AddToViewport(10);
+		}
+	}
+
+	if (FPSHudWidgetClass && !FPSHudWidgetInstance)
+	{
+		FPSHudWidgetInstance = CreateWidget<UTheHouseFPSHudWidget>(this, FPSHudWidgetClass);
+		if (FPSHudWidgetInstance)
+		{
+			FPSHudWidgetInstance->AddToViewport(5);
+		}
+	}
+
+	UpdateModeWidgetsVisibility();
+}
+
+void ATheHousePlayerController::UpdateModeWidgetsVisibility()
+{
+	const bool bRTS = IsValid(RTSPawnReference) && (GetPawn() == RTSPawnReference);
+
+	if (RTSMainWidgetInstance)
+	{
+		RTSMainWidgetInstance->SetVisibility(bRTS ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
+	}
+
+	if (FPSHudWidgetInstance)
+	{
+		FPSHudWidgetInstance->SetVisibility(
+			bRTS ? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
+	}
+}
+
+void ATheHousePlayerController::CloseRTSContextMenu()
+{
+	if (RTSContextMenuInstance)
+	{
+		RTSContextMenuInstance->RemoveFromParent();
+		RTSContextMenuInstance = nullptr;
+	}
+}
+
+bool ATheHousePlayerController::IsRtsCameraRotateModifierPhysicallyDown() const
+{
+	return TheHouseInputPoll::IsKeyPhysicallyDown(this, EKeys::LeftAlt) ||
+		   TheHouseInputPoll::IsKeyPhysicallyDown(this, EKeys::RightAlt);
+}
+
+ATheHouseObject* ATheHousePlayerController::FindPlacedTheHouseObjectUnderCursor() const
+{
+	FHitResult Hit;
+	if (GetHitResultUnderCursor(ECC_Visibility, false, Hit))
+	{
+		if (ATheHouseObject* Obj = Cast<ATheHouseObject>(Hit.GetActor()))
+		{
+			if (Obj != PreviewActor && !Obj->IsPlacementPreviewActor())
+			{
+				return Obj;
+			}
+		}
+	}
+
+	FVector WorldOrigin, WorldDir;
+	if (!DeprojectMousePositionToWorld(WorldOrigin, WorldDir))
+	{
+		return nullptr;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return nullptr;
+	}
+
+	const FVector End = WorldOrigin + WorldDir * 200000.f;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(TheHouseRTSContextPick), false);
+	if (RTSPawnReference)
+	{
+		Params.AddIgnoredActor(RTSPawnReference);
+	}
+	if (PreviewActor)
+	{
+		Params.AddIgnoredActor(PreviewActor);
+	}
+
+	auto PickClosestTheHouseObject = [this](const TArray<FHitResult>& Hits) -> ATheHouseObject*
+	{
+		ATheHouseObject* Best = nullptr;
+		float BestDist = TNumericLimits<float>::Max();
+		for (const FHitResult& H : Hits)
+		{
+			ATheHouseObject* Obj = Cast<ATheHouseObject>(H.GetActor());
+			if (!IsValid(Obj) || Obj == PreviewActor || Obj->IsPlacementPreviewActor())
+			{
+				continue;
+			}
+			const float D = H.Distance;
+			if (D < BestDist)
+			{
+				BestDist = D;
+				Best = Obj;
+			}
+		}
+		return Best;
+	};
+
+	TArray<FHitResult> Hits;
+	if (World->LineTraceMultiByChannel(Hits, WorldOrigin, End, ECC_Visibility, Params))
+	{
+		if (ATheHouseObject* Picked = PickClosestTheHouseObject(Hits))
+		{
+			return Picked;
+		}
+	}
+
+	Hits.Reset();
+	if (World->LineTraceMultiByChannel(Hits, WorldOrigin, End, ECC_WorldDynamic, Params))
+	{
+		if (ATheHouseObject* Picked = PickClosestTheHouseObject(Hits))
+		{
+			return Picked;
+		}
+	}
+
+	Hits.Reset();
+	if (World->LineTraceMultiByChannel(Hits, WorldOrigin, End, ECC_WorldStatic, Params))
+	{
+		if (ATheHouseObject* Picked = PickClosestTheHouseObject(Hits))
+		{
+			return Picked;
+		}
+	}
+
+	// Meshes / BP qui n’ignorent pas les canaux ci-dessus mais ne bloquent pas Visibility.
+	Hits.Reset();
+	FCollisionObjectQueryParams ObjParams;
+	ObjParams.AddObjectTypesToQuery(ECC_WorldStatic);
+	ObjParams.AddObjectTypesToQuery(ECC_WorldDynamic);
+	if (World->LineTraceMultiByObjectType(Hits, WorldOrigin, End, ObjParams, Params))
+	{
+		if (ATheHouseObject* Picked = PickClosestTheHouseObject(Hits))
+		{
+			return Picked;
+		}
+	}
+
+	return nullptr;
+}
+
+void ATheHousePlayerController::TryOpenRTSContextMenuAtCursor()
+{
+	if (!RTSPawnReference || GetPawn() != RTSPawnReference)
+	{
+		return;
+	}
+	if (IsRtsCameraRotateModifierPhysicallyDown())
+	{
+		return;
+	}
+
+	ATheHouseObject* Obj = FindPlacedTheHouseObjectUnderCursor();
+	if (!IsValid(Obj))
+	{
+		return;
+	}
+
+	if (UWorld* W = GetWorld())
+	{
+		const double T = W->GetTimeSeconds();
+		if (LastRTSContextMenuOpenDebounceSeconds >= 0.0 &&
+			FMath::IsNearlyEqual(T, LastRTSContextMenuOpenDebounceSeconds, 1.e-4))
+		{
+			return;
+		}
+		LastRTSContextMenuOpenDebounceSeconds = T;
+	}
+
+	CloseRTSContextMenu();
+
+	float MouseX = 0.f;
+	float MouseY = 0.f;
+	if (!GetMousePosition(MouseX, MouseY))
+	{
+		return;
+	}
+
+	if (!RTSContextMenuWidgetClass)
+	{
+		RTSContextMenuWidgetClass = UTheHouseRTSContextMenuWidget::StaticClass();
+	}
+
+	RTSContextMenuInstance = CreateWidget<UTheHouseRTSContextMenuWidget>(this, RTSContextMenuWidgetClass);
+	if (!RTSContextMenuInstance)
+	{
+		return;
+	}
+
+	RTSContextMenuInstance->AddToViewport(200);
+	RTSContextMenuInstance->OpenForTarget(this, Obj, FVector2D(MouseX, MouseY));
+}
+
+void ATheHousePlayerController::Input_CancelOrCloseRts()
+{
+	CloseRTSContextMenu();
+
+	if (PlacementState == EPlacementState::Previewing)
+	{
+		CancelPlacement();
+	}
+}
+
+void ATheHousePlayerController::Input_RTSObjectContext()
+{
+	TryOpenRTSContextMenuAtCursor();
+}
+
+void ATheHousePlayerController::RTS_DeletePlacedObject(ATheHouseObject* Obj)
+{
+	if (!IsValid(Obj) || Obj == PreviewActor)
+	{
+		return;
+	}
+
+	TArray<FIntPoint> Cells;
+	GetFootprintCellsForTransform(Obj, Obj->GetActorTransform(), Cells);
+	MarkCellsFree(Cells);
+
+	if (ITheHouseSelectable* Sel = Cast<ITheHouseSelectable>(Obj))
+	{
+		Sel->OnDeselect();
+	}
+
+	Obj->Destroy();
+}
+
+void ATheHousePlayerController::RTS_StorePlacedObject(ATheHouseObject* Obj)
+{
+	if (!IsValid(Obj) || Obj == PreviewActor)
+	{
+		return;
+	}
+
+	TArray<FIntPoint> Cells;
+	GetFootprintCellsForTransform(Obj, Obj->GetActorTransform(), Cells);
+	MarkCellsFree(Cells);
+
+	if (ITheHouseSelectable* Sel = Cast<ITheHouseSelectable>(Obj))
+	{
+		Sel->OnDeselect();
+	}
+
+	StoredPlaceables.Add(TSubclassOf<ATheHouseObject>(Obj->GetClass()));
+	Obj->Destroy();
+}
+
+void ATheHousePlayerController::ExecuteRTSContextMenuOption(FName OptionId, ATheHouseObject* TargetObject)
+{
+	if (!IsValid(TargetObject) || TargetObject == PreviewActor || TargetObject->IsPlacementPreviewActor())
+	{
+		CloseRTSContextMenu();
+		return;
+	}
+
+	if (OptionId == TheHouseRTSContextIds::DeleteObject)
+	{
+		RTS_DeletePlacedObject(TargetObject);
+	}
+	else if (OptionId == TheHouseRTSContextIds::StoreObject)
+	{
+		RTS_StorePlacedObject(TargetObject);
+	}
+	else
+	{
+		HandleRTSContextMenuOption(OptionId, TargetObject);
+	}
+
+	CloseRTSContextMenu();
+	RefreshRTSMainWidget();
+}
+
+void ATheHousePlayerController::RefreshRTSMainWidget()
+{
+	if (RTSMainWidgetInstance)
+	{
+		RTSMainWidgetInstance->RefreshAll();
+	}
+}
+
+void ATheHousePlayerController::HandleRTSContextMenuOption_Implementation(FName OptionId, ATheHouseObject* TargetObject)
+{
+	(void)OptionId;
+	(void)TargetObject;
+}

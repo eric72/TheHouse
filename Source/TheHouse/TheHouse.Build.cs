@@ -8,7 +8,17 @@ public class TheHouse : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 	
-		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput" });
+		PublicDependencyModuleNames.AddRange(new string[] {
+			"Core",
+			"CoreUObject",
+			"Engine",
+			"InputCore",
+			"EnhancedInput",
+			"AIModule",
+			"NavigationSystem",
+			"GameplayTasks",
+			"UMG"
+		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
 		
@@ -17,7 +27,8 @@ public class TheHouse : ModuleRules
 			"TheHouse",
 			"TheHouse/Core", 
 			"TheHouse/Player",
-			"TheHouse/Object"
+			"TheHouse/Object",
+			"TheHouse/AI"
 		});
 
 		// Uncomment if you are using Slate UI

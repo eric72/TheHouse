@@ -1,0 +1,12 @@
+{
+  "name": "thehouse-docs-site",
+  "private": true,
+  "description": "Serveur de dev local pour la doc statique (HTML/CSS) — pas de React/Next.",
+  "scripts": {
+    "dev": "vite",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^6.3.5"
+  }
+}
