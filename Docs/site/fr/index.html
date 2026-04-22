@@ -41,8 +41,10 @@
         <a href="#placement">Placement</a>
         <a href="#selectable">ITheHouseSelectable</a>
         <a href="#ia">IA slots</a>
+        <a href="#pnj">Système PNJ</a>
         <a href="#debug">Debug</a>
         <a href="#pieges">Pièges</a>
+        <a href="#localisation">Localisation</a>
         <a href="#refs">Références</a>
       </nav>
     </aside>
@@ -55,7 +57,7 @@
 
       <h2 id="vision">Vision du jeu</h2>
       <p>Gestion de casino type tycoon / <strong>RTS</strong> (caméra aérienne, placement). <strong>FPS</strong> en activité secondaire (exploration, missions) — le FPS ne gère pas la mécanique de gestion du casino. Voir aussi <code>Docs/PROJECT_OVERVIEW.md</code> et <code>Docs/SYSTEMS.md</code>.</p>
-      <p>Le C++ couvre surtout : caméra RTS, bascule FPS, placement d’objets, sélection, slots PNJ sur les objets, occlusion caméra, murs.</p>
+      <p>Le C++ couvre surtout : caméra RTS, bascule FPS, placement d’objets, sélection, slots PNJ sur les objets, <strong>socle PNJ</strong> (archetypes, registre par catégorie), occlusion caméra, murs.</p>
 
       <h2 id="archi">Architecture globale</h2>
       <pre class="ascii" aria-label="Schéma architecture">ATheHouseGameModeBase
@@ -64,7 +66,8 @@
   HUD = ATheHouseHUD
 
 UTheHouseGameViewportClient → molette → zoom RTS (avant PlayerInput)
-ATheHousePlayerController → possède RTS ou FPS, placement, sélection</pre>
+ATheHousePlayerController → possède RTS ou FPS, placement, sélection
+ATheHouseNPCCharacter + ATheHouseNPCAIController → PNJ (pas le PlayerController)</pre>
 
       <h2 id="arborescence">Arborescence du code</h2>
       <table>
@@ -80,6 +83,11 @@ ATheHousePlayerController → possède RTS ou FPS, placement, sélection</pre>
           <tr><td><code>Object/TheHouseObject</code></td><td>Objet plaçable, zone d’exclusion, PNJ.</td></tr>
           <tr><td><code>Placement/TheHousePlacementTypes.h</code></td><td><code>EPlacementState</code>.</td></tr>
           <tr><td><code>AI/TheHouseObjectSlotUserComponent</code></td><td>IA : réserver slot, MoveTo, align, montage.</td></tr>
+          <tr><td><code>NPC/TheHouseNPCTypes.h</code></td><td><code>ETheHouseNPCCategory</code>, <code>ETheHouseNPCSpecialKind</code>.</td></tr>
+          <tr><td><code>NPC/Archetypes/…</code></td><td>Data Assets : racine + Staff / Customer / Special (champs par catégorie).</td></tr>
+          <tr><td><code>NPC/TheHouseNPCCharacter.*</code></td><td><code>ATheHouseNPCCharacter</code> — <code>Wallet</code>, archetype.</td></tr>
+          <tr><td><code>NPC/TheHouseNPCAIController.*</code></td><td><code>ATheHouseNPCAIController</code> — BT / perception (extension).</td></tr>
+          <tr><td><code>NPC/TheHouseNPCSubsystem.*</code></td><td><code>UTheHouseNPCSubsystem</code> — liste par catégorie.</td></tr>
         </tbody>
       </table>
 
@@ -140,6 +148,20 @@ ATheHousePlayerController → possède RTS ou FPS, placement, sélection</pre>
         <li>Placement : preview sous le curseur, snap grille, rotation Shift+molette, confirmation clic.</li>
         <li>Sélection : rectangle HUD ; acteurs <code>ITheHouseSelectable</code> dans la zone → <code>OnSelect</code>.</li>
       </ul>
+      <h3>Sélection / panneau paramètres</h3>
+      <ul>
+        <li><code>Input_SelectPressed</code> / <code>Input_SelectReleased</code> gèrent le clic gauche RTS ; <code>Input_SelectDoubleClick</code> bind <strong>double clic gauche</strong> pour rouvrir le panneau même si le 2e clic est absorbé par l’UMG.</li>
+        <li><code>TheHouse_IsCursorOverBlockingRTSViewportUI</code> filtre l’UMG qui doit vraiment bloquer le monde. Les conteneurs plein écran purement décoratifs doivent rester en <code>SelfHitTestInvisible</code> / <code>HitTestInvisible</code>, pas en <code>Visible</code>.</li>
+        <li><strong>Blueprint à renseigner dans <code>BP_HouseController</code> :</strong> <code>PlacedObjectSettingsWidgetClass</code>, <code>RTS Main Widget Class</code>, <code>RTS Context Menu Widget Class</code>.</li>
+      </ul>
+
+      <h3>Menus contextuels PNJ / ordres</h3>
+      <ul>
+        <li><strong>Clic gauche</strong> : sélection (PNJ / objets <code>ITheHouseSelectable</code>).</li>
+        <li><strong>Clic droit</strong> : ouvre un menu selon le contexte (objet, PNJ “inspect”, ou menu <strong>ordres</strong> si au moins un PNJ est sélectionné).</li>
+        <li><strong>Propriétés BP (PlayerController)</strong> : <code>NPCRTSContextMenuWidgetClass</code> (menu PNJ), <code>NPCOrderContextMenuWidgetClass</code> (menu ordres).</li>
+        <li><strong>Actions dynamiques</strong> : surcharger <code>GatherNPCOrderActionsOnGround</code> / <code>ExecuteNPCOrderOnGroundAction</code> (ou équivalents objet/PNJ) dans le BP du PlayerController.</li>
+      </ul>
       <h3>RTS ↔ FPS</h3>
       <ul>
         <li><code>SwitchToRTS</code> : annule placement, aligne la caméra RTS sur le FPS (si hauteur OK), repossède le RTS, détruit le FPS, curseur visible.</li>
@@ -165,6 +187,8 @@ ATheHousePlayerController → possède RTS ou FPS, placement, sélection</pre>
         <li><strong>États</strong> : <code>EObjectPlacementState</code> (Valid, OverlapsObject, OverlapsWorld, OverlapsGrid).</li>
         <li><strong>PNJ</strong> : <code>FTheHouseNPCInteractionSlot</code> (socket + <code>PurposeTag</code>), réservation / libération de slots.</li>
         <li><strong>Sélection</strong> : surbrillance (Custom Depth / stencil).</li>
+        <li><strong>Panneau paramètres :</strong> cocher <code>bOpenParametersPanelOnLeftClick</code> sur le BP de l’objet pour autoriser l’ouverture au clic / double clic RTS.</li>
+        <li><strong>Économie objet :</strong> <code>PurchasePrice</code> = prix d’achat catalogue. <code>SellValue</code> = prix de revente si renseigné ; si <code>SellValue == 0</code>, la vente reprend <code>PurchasePrice</code>.</li>
       </ul>
 
       <h2 id="placement">Placement & grille</h2>
@@ -176,6 +200,23 @@ ATheHousePlayerController → possède RTS ou FPS, placement, sélection</pre>
 
       <h2 id="ia">IA — <code>UTheHouseObjectSlotUserComponent</code></h2>
       <p>États : Idle, MovingToSlot, Aligned, PlayingMontage. <code>UseObjectSlot</code> réserve un slot par tag, MoveTo via AIController, alignement interpolé, montage optionnel.</p>
+
+      <h2 id="pnj">Système PNJ (architecture)</h2>
+      <p><strong>Référence complète :</strong> <a href="../../Developer/GUIDE_FR.md#système-pnj-architecture">GUIDE_FR.md → Système PNJ</a>.</p>
+      <p>Les PNJ du casino ne sont <strong>pas</strong> pilotés par le <code>ATheHousePlayerController</code>. Ils utilisent <strong><code>ATheHouseNPCAIController</code></strong> et <strong><code>ATheHouseNPCCharacter</code></strong>. Les données par métier vivent sous <strong><code>Source/TheHouse/NPC/Archetypes/</code></strong> : classe racine <code>UTheHouseNPCArchetype</code> (non abstraite pour le picker d’assets) et trois types d’assets concrets (Staff, Customer, Special). Le salaire staff est en <strong><code>StaffMonthlySalary</code></strong> sur le personnage (modifiable UI) ; initialisé depuis <code>DefaultMonthlySalary</code> sur l’archetype Staff. <strong><code>UTheHouseNPCSubsystem</code></strong> : <code>GetNPCsByCategory</code>. <strong><code>ITheHouseNPCIdentity</code></strong> pour interroger catégorie / archetype.</p>
+      <p>Pour utiliser tables et machines : ajouter le composant <strong><code>UTheHouseObjectSlotUserComponent</code></strong> au Blueprint PNJ et appeler <code>UseObjectSlot</code> avec le même <code>PurposeTag</code> que les slots définis sur les <code>ATheHouseObject</code>.</p>
+      <p><strong>Compilation :</strong> si Live Coding bloque la build, fermer l’éditeur ou désactiver Live Coding avant de compiler le module C++.</p>
+      <h3>Prochaines étapes (éditeur)</h3>
+      <ol>
+        <li>Compiler le module <code>TheHouse</code> (sans Live Coding bloquant).</li>
+        <li>Créer des Data Assets du bon sous-type (Staff / Customer / Special) dans <code>NPC/Archetypes</code>.</li>
+        <li>Blueprint parent <code>ATheHouseNPCCharacter</code> : mesh, anim, <code>NPC Archetype</code>.</li>
+        <li>Ajouter <code>TheHouse Object Slot User</code> sur ce Blueprint pour les objets casino.</li>
+        <li>Vérifier le contrôleur IA (<code>ATheHouseNPCAIController</code> ou BP dérivé).</li>
+        <li>Brancher Behavior Tree + Blackboard sur le contrôleur IA selon les besoins.</li>
+        <li>Tester <code>GetNPCsByCategory</code> avec plusieurs PNJ.</li>
+        <li>Raccorder salaires et flux argent à l’économie globale quand elle sera prête.</li>
+      </ol>
 
       <h2 id="debug">Debug</h2>
       <table>
@@ -193,7 +234,14 @@ ATheHousePlayerController → possède RTS ou FPS, placement, sélection</pre>
         <li>Event Tick Blueprint sans appeler Parent sur le PC / Pawn.</li>
         <li>Double chemin molette en plus du GameViewportClient.</li>
         <li>Surfaces trop pentues ou pas de hit sous le curseur → placement invalide.</li>
+        <li>Le panneau paramètres “ne s’ouvre pas” : vérifier <code>PlacedObjectSettingsWidgetClass</code> sur le PlayerController BP, la collision <code>Visibility</code> de l’objet, puis <code>bOpenParametersPanelOnLeftClick</code> sur le BP de l’objet.</li>
       </ol>
+
+      <h2 id="localisation">Localisation (pipeline complet)</h2>
+      <p>Créer une fois la cible <strong>Game</strong> dans le tableau de bord (<code>Config/Localization/Game_*.ini</code>). Utiliser <strong><code>Scripts/RunLocalizationStep.ps1</code></strong> avec <code>-Step …</code> pour lancer <code>UnrealEditor-Cmd</code> avec <code>-LiveCoding=false</code>. Workflows complets (PO, CSV dialogue, import WAV, Wwise) : <a href="../../Developer/GUIDE_FR.md#localisation-pipeline-complet-en-ligne-de-commande">GUIDE_FR.md → Localisation</a>.</p>
+      <p><strong>Commande maître</strong> (remplacer <code>&lt;Etape&gt;</code> par <code>Gather</code>, <code>Compile</code>, <code>Export</code>, <code>Import</code>, <code>ExportDialogueScript</code>, <code>ImportDialogueScript</code>, <code>ImportDialogue</code>, <code>Reports</code>, ou <code>RepairGatherIni</code>) :</p>
+      <pre class="cmd"><code>powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Eric\Documents\Unreal Projects\TheHouse\Scripts\RunLocalizationStep.ps1" -Step &lt;Etape&gt;</code></pre>
+      <p><strong>Raccourcis :</strong> <code>GatherLocalization.ps1</code> / <code>CompileLocalization.ps1</code>. Texte : Gather → Compile. Voix Unreal : ExportDialogueScript → … → ImportDialogue (config <code>Game_ImportDialogue.ini</code>) → Compile. <strong>Wwise</strong> reste un pipeline audio à part.</p>
 
       <h2 id="refs">Références</h2>
       <ul>

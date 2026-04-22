@@ -1,55 +1,40 @@
 #include "TheHouseRTSContextMenuWidget.h"
 
-#include "Blueprint/WidgetTree.h"
-#include "Components/Border.h"
-#include "Components/Button.h"
-#include "Components/CanvasPanel.h"
-#include "Components/CanvasPanelSlot.h"
-#include "Components/TextBlock.h"
-#include "Components/VerticalBox.h"
+#include "Blueprint/WidgetLayoutLibrary.h"
+#include "GameFramework/PlayerController.h"
+#include "Styling/SlateColor.h"
+#include "Styling/AppStyle.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Text/STextBlock.h"
+
 #include "TheHouseObject.h"
 #include "TheHousePlayerController.h"
-#include "TheHouseRTSUIClickRelay.h"
 #include "TheHouseRTSUITypes.h"
 
-void UTheHouseRTSContextMenuWidget::NativeConstruct()
+TSharedRef<SWidget> UTheHouseRTSContextMenuWidget::RebuildWidget()
 {
-	Super::NativeConstruct();
-	RebuildRootIfNeeded();
+	OptionsSlateBox = SNew(SVerticalBox);
+
+	RootBorder =
+		SNew(SBorder)
+		.Padding(FMargin(8.f))
+		.BorderBackgroundColor(FLinearColor(0.05f, 0.05f, 0.06f, 0.92f))
+		[
+			OptionsSlateBox.ToSharedRef()
+		];
+
+	RebuildOptionButtons();
+
+	return RootBorder.ToSharedRef();
 }
 
-void UTheHouseRTSContextMenuWidget::RebuildRootIfNeeded()
+void UTheHouseRTSContextMenuWidget::ReleaseSlateResources(bool bReleaseChildren)
 {
-	UWidgetTree* Tree = WidgetTree.Get();
-	if (!Tree)
-	{
-		return;
-	}
-
-	if (Tree->RootWidget)
-	{
-		RootCanvas = Cast<UCanvasPanel>(Tree->RootWidget.Get());
-		return;
-	}
-
-	RootCanvas = Tree->ConstructWidget<UCanvasPanel>(UCanvasPanel::StaticClass(), TEXT("RTSContextRoot"));
-	Tree->RootWidget = RootCanvas;
-
-	MenuBorder = Tree->ConstructWidget<UBorder>(UBorder::StaticClass(), TEXT("RTSContextBorder"));
-	MenuBorder->SetPadding(FMargin(8.f));
-	FSlateBrush Brush;
-	Brush.TintColor = FSlateColor(FLinearColor(0.05f, 0.05f, 0.06f, 0.92f));
-	MenuBorder->SetBrush(Brush);
-
-	OptionsBox = Tree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), TEXT("RTSContextOptions"));
-	MenuBorder->SetContent(OptionsBox);
-
-	if (UCanvasPanelSlot* CanvasSlot = RootCanvas->AddChildToCanvas(MenuBorder))
-	{
-		CanvasSlot->SetAutoSize(true);
-		CanvasSlot->SetAnchors(FAnchors(0.f, 0.f, 0.f, 0.f));
-		CanvasSlot->SetAlignment(FVector2D(0.f, 0.f));
-	}
+	Super::ReleaseSlateResources(bReleaseChildren);
+	RootBorder.Reset();
+	OptionsSlateBox.Reset();
 }
 
 void UTheHouseRTSContextMenuWidget::OpenForTarget(ATheHousePlayerController* InOwnerPC, ATheHouseObject* InTarget, const FVector2D& ScreenPosition)
@@ -57,35 +42,40 @@ void UTheHouseRTSContextMenuWidget::OpenForTarget(ATheHousePlayerController* InO
 	OwnerPC = InOwnerPC;
 	TargetObject = InTarget;
 
-	RebuildRootIfNeeded();
 	RebuildOptionButtons();
 
 	SetVisibility(ESlateVisibility::Visible);
+	SetRenderOpacity(1.f);
+	SetIsEnabled(true);
 
-	if (UCanvasPanelSlot* BorderSlot = MenuBorder ? Cast<UCanvasPanelSlot>(MenuBorder->Slot) : nullptr)
+	SetAlignmentInViewport(FVector2D(0.f, 0.f));
+	FVector2D Pos = ScreenPosition;
+
+	if (UWorld* W = GetWorld())
 	{
-		BorderSlot->SetPosition(FVector2D::ZeroVector);
+		const FVector2D VS = UWidgetLayoutLibrary::GetViewportSize(W);
+		if (VS.X > 0.f && VS.Y > 0.f)
+		{
+			Pos.X = FMath::Clamp(Pos.X, 0.f, VS.X - 10.f);
+			Pos.Y = FMath::Clamp(Pos.Y, 0.f, VS.Y - 10.f);
+		}
 	}
 
-	// Position en pixels viewport (évite un menu « invisible » si le slot canvas ne suit pas le DPI).
-	SetPositionInViewport(ScreenPosition, false);
+	SetPositionInViewport(Pos, /*bRemoveDPIScale*/ false);
+	InvalidateLayoutAndVolatility();
+	TSharedRef<SWidget> Slate = TakeWidget();
+	Slate->SlatePrepass();
+	ForceLayoutPrepass();
 }
 
 void UTheHouseRTSContextMenuWidget::RebuildOptionButtons()
 {
-	if (!OptionsBox)
+	if (!OptionsSlateBox.IsValid())
 	{
 		return;
 	}
 
-	UWidgetTree* Tree = WidgetTree.Get();
-	if (!Tree)
-	{
-		return;
-	}
-
-	OptionsBox->ClearChildren();
-	ClickRelays.Empty();
+	OptionsSlateBox->ClearChildren();
 
 	if (!OwnerPC || !TargetObject)
 	{
@@ -100,20 +90,37 @@ void UTheHouseRTSContextMenuWidget::RebuildOptionButtons()
 			continue;
 		}
 
-		UButton* Btn = Tree->ConstructWidget<UButton>(UButton::StaticClass());
-		UTextBlock* Label = Tree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
-		Label->SetText(Def.Label.IsEmpty() ? FText::FromName(Def.OptionId) : Def.Label);
-		Label->SetColorAndOpacity(FSlateColor(FLinearColor::White));
-		Btn->AddChild(Label);
+		const FText LabelText = Def.Label.IsEmpty() ? FText::FromName(Def.OptionId) : Def.Label;
+		const FName OptionId = Def.OptionId;
+		const TWeakObjectPtr<ATheHousePlayerController> WeakPC = OwnerPC;
+		const TWeakObjectPtr<ATheHouseObject> WeakTarget = TargetObject;
 
-		UTheHouseRTSUIClickRelay* Relay = NewObject<UTheHouseRTSUIClickRelay>(this);
-		Relay->Kind = ETheHouseRTSUIClickKind::ContextOption;
-		Relay->OwnerPC = OwnerPC;
-		Relay->ContextTarget = TargetObject;
-		Relay->ContextOptionId = Def.OptionId;
-		ClickRelays.Add(Relay);
-		Btn->OnClicked.AddDynamic(Relay, &UTheHouseRTSUIClickRelay::RelayClicked);
+		const FButtonStyle& BtnStyle = FAppStyle::Get().GetWidgetStyle<FButtonStyle>("Button");
 
-		OptionsBox->AddChildToVerticalBox(Btn);
+		// Un seul enfant STextBlock en HitTestInvisible : évite tout SBorder intermédiaire
+		// qui pourrait intercepter le hit-test selon la version Slate/UMG.
+		OptionsSlateBox->AddSlot()
+		.AutoHeight()
+		.Padding(FMargin(0.f, 2.f))
+		[
+			SNew(SButton)
+			.ButtonStyle(&BtnStyle)
+			.Cursor(EMouseCursor::Hand)
+			.ContentPadding(FMargin(10.f, 6.f))
+			.OnClicked_Lambda([WeakPC, WeakTarget, OptionId]()
+			{
+				if (ATheHousePlayerController* PC = WeakPC.Get())
+				{
+					PC->ExecuteRTSContextMenuOption(OptionId, WeakTarget.Get());
+				}
+				return FReply::Handled();
+			})
+			[
+				SNew(STextBlock)
+				.Text(LabelText)
+				.ColorAndOpacity(FSlateColor(FLinearColor::White))
+				.Visibility(EVisibility::HitTestInvisible)
+			]
+		];
 	}
 }

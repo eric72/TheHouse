@@ -43,7 +43,7 @@ enum class EObjectPlacementState : uint8
 /**
  * Objet casino / décor plaçable.
  * — Zone verte (exclusion) : taille + décalage dans le BP ; les autres objets ne peuvent pas la chevaucher.
- * — Visualiseur : mesh semi-transparent pour voir la zone en déplaçant l’objet.
+ * — Visualiseur : mesh semi-transparent ; en preview seuls valid/invalid s’appliquent à ce volume, pas au mesh de l’objet.
  * — Surbrillance : Custom Depth pour contour en post-process.
  *
  * Doc projet : Docs/Features/CasinoPlaceableObjects/README.md — index : Docs/README.md — changelog : Docs/Changelog/CHANGELOG.md
@@ -67,6 +67,34 @@ public:
 	/** Mesh principal de l'objet (celui que tu règles dans le BP). */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Casino|Object", meta=(AllowPrivateAccess="true"))
 	UStaticMeshComponent* ObjectMesh = nullptr;
+
+	/** Valeur de revente / remboursement quand on "Vendre" via le menu contextuel.
+	 *  Si = 0 : par défaut on utilise PurchasePrice (voir RTS_SellPlacedObject). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Casino|Economy", meta=(ClampMin="0"))
+	int32 SellValue = 0;
+
+	/** Coût en argent pour placer une nouvelle instance depuis le catalogue RTS (0 = gratuit). Le stock ne refacture pas. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Casino|Economy", meta=(ClampMin="0"))
+	int32 PurchasePrice = 0;
+
+	// --- Panneau paramètres (WBP sur le PlayerController : PlacedObjectSettingsWidgetClass) ---
+	// Le PC n’ouvre le panneau qu’après sélection trace (ECC_Visibility) ; filtre UMG : TheHouse_IsCursorOverBlockingRTSViewportUI.
+
+	/** Si true : clic gauche RTS sur cet objet ouvre le WBP de paramètres (sinon sélection seulement). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Casino|UI|Parameters Panel")
+	bool bOpenParametersPanelOnLeftClick = false;
+
+	/** Si true : l’objet peut faire circuler de l’argent côté PNJ (dépense / retour — affiché dans le WBP). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Casino|UI|Parameters Panel|Economy")
+	bool bNpcMoneyFlowEnabled = false;
+
+	/** Somme qu’un PNJ paie pour jouer une fois (ex. mise). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Casino|UI|Parameters Panel|Economy", meta=(ClampMin="0", EditCondition="bNpcMoneyFlowEnabled"))
+	int32 NpcSpendToPlay = 0;
+
+	/** Somme max que la maison / le joueur peut récupérer (gain max « rapporté »). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Casino|UI|Parameters Panel|Economy", meta=(ClampMin="0", EditCondition="bNpcMoneyFlowEnabled"))
+	int32 NpcMaxReturnToHouse = 0;
 
 	/** Demi-tailles locales de la zone où aucun autre ATheHouseObject ne peut être posé. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Casino|Placement|Exclusion zone", meta = (ClampMin = "1.0"))
@@ -114,6 +142,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Casino|Placement")
 	FBox GetWorldPlacementExclusionBox() const;
 
+	/**
+	 * Centre et demi-extents (monde) pour dessiner un contour autour du rendu principal :
+	 * pour ATheHouseObject = bounds de **ObjectMesh** (sans le visualiseur d’exclusion).
+	 */
+	static void GetActorOutlineDebugBounds(AActor* Actor, FVector& OutCenter, FVector& OutExtent);
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Casino|Placement")
 	EObjectPlacementState PlacementState = EObjectPlacementState::Valid;
 
@@ -142,6 +176,12 @@ public:
 	/** Ignore actor (typically the floor/landscape under cursor) for world overlap checks. */
 	void SetPlacementWorldIgnoreActor(AActor* Actor) { PlacementWorldIgnoreActor = Actor; }
 
+	/** Vide la liste des bloqueurs (sans toucher au mesh) quand EvaluatePlacementAt n'est pas appelé (ex. trace invalide). */
+	void ClearPlacementBlockerActorCaches();
+
+	/** Retire contours Custom Depth et caches bloqueurs (ex. avant Destroy du preview). */
+	void TeardownPlacementBlockerVisualFeedback();
+
 	/** Met à jour mesh / scale du visualiseur (appelé en construction et quand tu changes les tailles en BP). */
 	UFUNCTION(BlueprintCallable, Category = "Casino|Placement")
 	void RefreshExclusionZonePreviewMesh();
@@ -159,6 +199,29 @@ public:
 	// --- Surbrillance (contour) ---
 	UPROPERTY(EditAnywhere, Category = "Casino|Highlight", meta = (ClampMin = "0", ClampMax = "255"))
 	uint8 HighlightStencilValue = 1;
+
+	/**
+	 * Overlay sur les meshes en sélection RTS. Si null : le C++ utilise un MID teinté « crème »
+	 * dérivé de M_Placement_Valid (pas le même rendu que la zone d’exclusion verte).
+	 * Tu peux assigner ici un MI dédié (ex. contour blanc cassé / léger fresnel).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Casino|Highlight")
+	UMaterialInterface* SelectionOverlayMaterial = nullptr;
+
+	/**
+	 * Nombre max d'acteurs à surligner (perf mobile / Steam Deck). 0 = désactivé.
+	 * Custom Depth utilise **HighlightStencilValue** (comme la sélection) si un post-process d’outline est configuré.
+	 */
+	/** 0 = utiliser 6 pour l’affichage (les BP à 0 ne voyaient aucun bloqueur). */
+	UPROPERTY(EditAnywhere, Category = "Casino|Placement|Blocker highlight", meta = (ClampMin = "0", ClampMax = "32"))
+	int32 MaxPlacementBlockerOutlines = 6;
+
+	/**
+	 * Matériau **overlay** sur les meshes bloquants (visible sans post-process de contour).
+	 * Par défaut = même asset que l’invalid placement si présent dans le projet ; sinon null (rien).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Casino|Placement|Blocker highlight")
+	UMaterialInterface* PlacementBlockerOverlayMaterial = nullptr;
 
 	UFUNCTION(BlueprintCallable, Category = "Casino|Highlight")
 	void SetHighlighted(bool bHighlighted);
@@ -197,6 +260,8 @@ public:
 
 protected:
 	void ApplyHighlightToRenderers(bool bOn);
+	UMaterialInterface* ResolveSelectionOverlayMaterial() const;
+	UMaterialInterface* ResolveBlockerOverlayMaterial() const;
 	void ApplyExclusionZoneMaterial();
 	bool ShouldSkipHighlightOnPrimitive(UPrimitiveComponent* Prim) const;
 	void ApplyPreviewCollisionAndRendering(bool bEnablePreview);
@@ -204,8 +269,53 @@ protected:
 	void RestoreOriginalMaterials();
 	void ApplyPlacementMaterialToRenderers(UMaterialInterface* MaterialOverride);
 
+	bool TestFootprintOverlapsWorldAtWithBlockerList(
+		const FTransform& WorldTransform,
+		TArray<TObjectPtr<AActor>>* OutSortedUniqueBlockers,
+		int32 MaxBlockersToStore) const;
+
+	void RefreshPlacementBlockerHighlights();
+	/** Contour fil (DrawDebugBox) autour des bloqueurs : visible sans post-process ni matériau d’overlay spécial. */
+	void DrawPlacementBlockerWireBounds();
+	void ClearPlacementBlockerHighlights();
+	bool PlacementBlockerHighlightTargetsMatch(const TArray<AActor*>& Desired) const;
+	void ApplyBlockerOutlineToActor(AActor* Blocker);
+
 	UPROPERTY(Transient)
 	bool bHighlighted = false;
+
+	/** Bloqueurs détectés au dernier EvaluatePlacementAt (autres objets casino). */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<ATheHouseObject>> PlacementFeedbackObjectBlockers;
+
+	/** Bloqueurs monde (murs, géo) au dernier EvaluatePlacementAt. */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<AActor>> PlacementFeedbackWorldBlockers;
+
+	TArray<TWeakObjectPtr<AActor>> PlacementBlockerHighlightTargets;
+
+	struct FPlacementBlockedPrimRestoreState
+	{
+		TWeakObjectPtr<UPrimitiveComponent> Primitive;
+		bool bHadCustomDepth = false;
+		int32 StencilValue = 0;
+		bool bTouchedOverlay = false;
+		TWeakObjectPtr<UMaterialInterface> PreviousOverlay;
+		bool bTouchedOverlayMaxDrawDistance = false;
+		float PreviousOverlayMaxDrawDistance = 0.f;
+	};
+
+	TArray<FPlacementBlockedPrimRestoreState> PlacementBlockerPrimitiveRestoreStack;
+
+	struct FSelectionOverlayRestore
+	{
+		TWeakObjectPtr<UMeshComponent> Mesh;
+		TWeakObjectPtr<UMaterialInterface> PrevOverlay;
+		bool bTouchedOverlayMaxDrawDistance = false;
+		float PreviousOverlayMaxDrawDistance = 0.f;
+	};
+
+	TArray<FSelectionOverlayRestore> SelectionOverlayRestoreStack;
 
 public:
 
@@ -252,3 +362,7 @@ protected:
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<APawn>> NPCSlotOccupants;
 };
+
+class UMaterialInstanceDynamic;
+/** MID crème partagé avec la sélection RTS des objets (`ApplyHighlightToRenderers`). */
+THEHOUSE_API UMaterialInstanceDynamic* TheHouse_GetSharedRTSSelectionCreamOverlayMID();

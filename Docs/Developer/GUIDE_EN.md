@@ -16,17 +16,20 @@ Onboarding documentation for anyone taking over the C++ codebase and gameplay sy
 6. [GameMode](#gamemode-athehousegamemodebase)
 7. [Viewport client (RTS mouse wheel)](#viewport-client-uthehousegameviewportclient)
 8. [PlayerController (RTS / FPS)](#playercontroller-athehouseplayercontroller)
-9. [RTS pawn: camera](#rts-pawn-athehousecamerapawn)
-10. [FPS character](#fps-character-athehousefpscharacter)
-11. [HUD & selection](#hud--selection)
-12. [Casino objects: `ATheHouseObject`](#casino-objects-athehouseobject)
-13. [Placement (grid, preview)](#placement-grid-preview)
-14. [`ITheHouseSelectable` interface](#ithehouseselectable-interface)
-15. [AI: NPC slot usage](#ai-npc-slot-usage)
-16. [Smart wall](#smart-wall)
-17. [Debug & console variables](#debug--console-variables)
-18. [Common pitfalls](#common-pitfalls)
-19. [Existing documentation](#existing-documentation)
+9. [RTS UI: main panel vs context menu](#rts-ui-main-panel-vs-context-menu)
+10. [RTS pawn: camera](#rts-pawn-athehousecamerapawn)
+11. [FPS character](#fps-character-athehousefpscharacter)
+12. [HUD & selection](#hud--selection)
+13. [Casino objects: `ATheHouseObject`](#casino-objects-athehouseobject)
+14. [Placement (grid, preview)](#placement-grid-preview)
+15. [`ITheHouseSelectable` interface](#ithehouseselectable-interface)
+16. [AI: NPC slot usage](#ai-npc-slot-usage)
+17. [NPC system (architecture)](#npc-system-architecture)
+18. [Smart wall](#smart-wall)
+19. [Debug & console variables](#debug--console-variables)
+20. [Common pitfalls](#common-pitfalls)
+21. [Existing documentation](#existing-documentation)
+22. [Localization (full command-line pipeline)](#localization-full-command-line-pipeline)
 
 ---
 
@@ -38,7 +41,7 @@ Design summary (see also `Docs/PROJECT_OVERVIEW.md` and `Docs/SYSTEMS.md`):
 - **Secondary activity:** **FPS** (exploration, missions). FPS **does not** run casino management.
 - **Target systems:** RTS camera, grid placement, NPC staff, economy, object interaction.
 
-Current C++ work focuses on **RTS camera**, **FPS switch**, **object placement**, **selection**, **NPC slots** on objects, and helpers (**camera occlusion**, walls, etc.).
+Current C++ work focuses on **RTS camera**, **FPS switch**, **object placement**, **selection**, **NPC slots** on objects, an **NPC foundation** (categories, archetype Data Assets, world registry), and helpers (**camera occlusion**, walls, etc.).
 
 ---
 
@@ -56,9 +59,10 @@ Current C++ work focuses on **RTS camera**, **FPS switch**, **object placement**
  (wheel → RTS zoom)            (selection rect)
 ```
 
-- **`ATheHousePlayerController`** possesses either the **RTS pawn** (`ATheHouseCameraPawn`) or the **FPS character** (`ATheHouseFPSCharacter`). It centralizes zoom, RTS movement, placement, selection, and FPS transition.
+- **`ATheHousePlayerController`** possesses either the **RTS pawn** (`ATheHouseCameraPawn`) or the **FPS character** (`ATheHouseFPSCharacter`). It centralizes zoom, RTS movement, placement, selection, and FPS transition. It **does not** drive casino NPCs (see **NPC system** below).
 - **`ATheHouseObject`** is a placeable actor with an **exclusion footprint** (prevents overlap), placement states, and **NPC slots** (sockets + tags).
 - **`UTheHouseObjectSlotUserComponent`** is an AI helper to reserve a slot, move, align, and optionally play a montage — no Behavior Tree required.
+- **`ATheHouseNPCCharacter` + `ATheHouseNPCAIController` + `UTheHouseNPCSubsystem`:** NPC characters possessed by an **AIController**, tracked by **category**; configured via **`NPC/Archetypes/`** Data Assets (**Staff / Customer / Special**, all derived from **`UTheHouseNPCArchetype`** — root is non-abstract so the editor asset picker lists subclasses).
 
 ---
 
@@ -78,6 +82,13 @@ Current C++ work focuses on **RTS camera**, **FPS switch**, **object placement**
 | `Source/TheHouse/Object/TheHouseObject.*` | Placeable casino object, footprint, NPCs. |
 | `Source/TheHouse/Placement/TheHousePlacementTypes.h` | `EPlacementState` (None / Previewing / Placing). |
 | `Source/TheHouse/AI/TheHouseObjectSlotUserComponent.*` | “Premium” AI helper for object slots. |
+| `Source/TheHouse/NPC/TheHouseNPCTypes.h` | `ETheHouseNPCCategory`, `ETheHouseNPCSpecialKind` (police, firefighter, doctor, …). |
+| `Source/TheHouse/NPC/Archetypes/TheHouseNPCArchetype.*` | Root **`UTheHouseNPCArchetype`** plus **`…Staff` / `…Customer` / `…Special`** — category-specific fields. |
+| `Source/TheHouse/NPC/TheHouseNPCIdentity.h` | Interface **`ITheHouseNPCIdentity`** (`GetNPCCategory`, `GetNPCArchetype`). |
+| `Source/TheHouse/NPC/TheHouseNPCCharacter.*` | **`ATheHouseNPCCharacter`** — runtime state (`Wallet`), `ApplyArchetypeDefaults`, AI possession. |
+| `Source/TheHouse/NPC/TheHouseNPCAIController.*` | **`ATheHouseNPCAIController`** — hook for BT / perception (extend as needed). |
+| `Source/TheHouse/NPC/TheHouseNPCSubsystem.*` | **`UTheHouseNPCSubsystem`** — category registry in the world (`GetNPCsByCategory`). |
+| `Source/TheHouse/NPC/TheHouseNPC.h` | Optional umbrella include for the NPC module. |
 
 **Blueprints:** the map’s default game mode is often `BP_HouseGameMode` (`Config/DefaultEngine.ini`). It **must** inherit from or use the project’s C++ classes so input fixes and the custom PC apply.
 
@@ -173,6 +184,15 @@ Files: `TheHousePlayerController.h/.cpp`
 5. **Grid:** `FTheHousePlacementGridSettings` (`CellSize`, `WorldOrigin`, `MinUpNormalZ`, `bEnableGridSnap`), runtime cache **`OccupiedGridCells`**.
 6. **Selection:** mouse drag + HUD; on release, actors in the rectangle implementing **`ITheHouseSelectable`** receive **`OnSelect`**.
 
+### RTS selection: marquee, UMG, parameters panel
+
+- **`Input_SelectPressed` / `Input_SelectReleased`** (`TheHousePlayerController.cpp`): in RTS (pawn = camera), **left click** starts **`bIsSelecting`**; timer **`TheHouse_PollInputFrame`** calls **`ATheHouseHUD::UpdateSelection`** for the green marquee.
+- **`Input_SelectDoubleClick`**: the PlayerController also binds **`EKeys::LeftMouseButton` + `IE_DoubleClick`**. This is a fallback when the **second click** is swallowed by UMG: a double-click on an object can still run a world trace and reopen the parameters panel.
+- **`bRtsSelectGestureFromWorld`:** set **true** only if the press actually started this drag from “world” input (no early-return). On **release**, if **false**, all marquee / single-click selection logic is skipped (avoids using a stale **`SelectionStartPos`** after a UI click).
+- **`TheHouse_IsCursorOverBlockingRTSViewportUI`:** whether the cursor is over UMG that **must** consume the click instead of the world. **Context menu** and **placed-object settings** use widget **geometry** (`IsUnderLocation`). The **main RTS panel** no longer relies on root **geometry alone** (often fullscreen): Slate **widget path** under the cursor + UMG **`Visible`** (hit-testable) in that WBP tree; **`SelfHitTestInvisible`** / **`HitTestInvisible`** regions let clicks reach the world (marquee, object picks).
+- **Parameters panel:** **`PlacedObjectSettingsWidgetClass`** on the Player Controller Blueprint (usually **`BP_HouseController`**); on the object **`bOpenParametersPanelOnLeftClick`** (+ economy **`bNpcMoneyFlowEnabled`**, **`NpcSpendToPlay`**, **`NpcMaxReturnToHouse`**). Opened via **`OpenPlacedObjectSettingsWidgetFor`** after selection; close with **`ClosePlacedObjectSettingsPanel`** (Blueprint), Escape (**`TryConsumeEscapeForRtsUi`**), or sell from the menu. A **second click** on the **same** object refreshes the existing WBP (**`SetTargetPlacedObject`**) without recreating it.
+- **Blueprint checklist:** in **`BP_HouseController`**, set **`PlacedObjectSettingsWidgetClass`**, **`RTS Main Widget Class`**, and **`RTS Context Menu Widget Class`** if you use custom WBPs. In each casino object BP, verify **`bOpenParametersPanelOnLeftClick`**, **`PurchasePrice`**, and **`SellValue`**.
+
 ### RTS ↔ FPS switch
 
 - **`SwitchToRTS()`:** cancels placement, syncs RTS camera to FPS position (if height is reasonable), repossesses RTS pawn, **destroys** FPS character, cursor visible, `FInputModeGameAndUI`.
@@ -190,6 +210,27 @@ Files: `TheHousePlayerController.h/.cpp`
 - Optional XY snap, yaw = `PlacementPreviewYawDegrees`.
 - **`ATheHouseObject::EvaluatePlacementAt`:** overlap with other objects + world.
 - Grid: approximate **exclusion box** footprint projected to cells; tested against `OccupiedGridCells`.
+
+---
+
+## RTS UI: main panel vs context menu
+
+`ATheHousePlayerController` references **two** different widget types (not a duplicate):
+
+| Property (usually in the Player Controller Blueprint **Class Defaults**, e.g. `BP_HouseController`) | Reference C++ class | Role |
+|------------------------------------------------------------------------------------------------------|---------------------|------|
+| **`RTS Main Widget Class`** | `UTheHouseRTSMainWidget` | **Persistent RTS panel:** money, placement catalog, stock (counts per type). Shown while the player is in **RTS mode**. |
+| **`RTS Context Menu Widget Class`** | `UTheHouseRTSContextMenuWidget` (pure Slate) or `UTheHouseRTSContextMenuUMGWidget` / child WBP | **Context menu** on **right-click** on a placed **`ATheHouseObject`** (e.g. *Sell*, *Store to stock*). Temporary popup under the cursor, closed after the action. |
+
+**Customizing the main panel:** create a Widget Blueprint parented to **`TheHouse RTS Main Widget`**, add three widgets named exactly **`MoneyText`**, **`CatalogScroll`**, **`StoredScroll`** (C++ `BindWidgetOptional`), then assign that WBP to **`RTS Main Widget Class`**. Details and pitfalls: comments in `Source/TheHouse/UI/TheHouseRTSMainWidget.h`.
+
+**Thumbnails:** in **`PlaceableCatalog`** (Player Controller Class Defaults), each entry can set **`Thumbnail`** (`Texture2D`); the RTS panel shows the image next to the label in both **catalog** and **stock** when the same **`ObjectClass`** exists in the catalog.
+
+**Show lists only after clicking an icon:** C++ always fills `CatalogScroll` / `StoredScroll`; to **hide them by default**, parent them under a **`Border`** / **`WidgetSwitcher`** / panel and toggle **`Visibility`** (Collapsed / Visible) from the WBP **graph** (icon button → `SetVisibility`), e.g. after **After RTS Main Refreshed** if you need to resync state.
+
+**`None` on `RTS Main Widget Class`:** at runtime, if the property is empty, `InitializeModeWidgets()` assigns the default C++ class `UTheHouseRTSMainWidget`.
+
+**Hit-testing vs selection:** a fullscreen root **Canvas / Border** set to **`Visible`** still counts as “over UI” (blocks world). For decorative fullscreen chrome, prefer **`SelfHitTestInvisible`** (or **`HitTestInvisible`**); keep **`Visible`** for real controls (buttons, lists, text).
 
 ---
 
@@ -217,6 +258,7 @@ Files: `TheHouseFPSCharacter.h/.cpp`
 
 - **`ATheHouseHUD`:** `StartSelection` / `UpdateSelection` / `StopSelection` / `DrawHUD` for the rectangle.
 - Which actors are selected is resolved in the **PlayerController** (screen-space / selection logic).
+- UMG filtering + **`bRtsSelectGestureFromWorld`:** see **PlayerController → RTS selection** above.
 
 ---
 
@@ -248,6 +290,12 @@ Files: `TheHouseObject.h/.cpp`
 
 - **`OnSelect` / `OnDeselect`:** highlight (**Custom Depth** / stencil), etc.
 
+### Parameters panel (casino)
+
+- **`bOpenParametersPanelOnLeftClick`:** when enabled on the object BP, an RTS **left click** that selects that object opens the WBP (**`PlacedObjectSettingsWidgetClass`** on the player controller).
+- **NPC economy (WBP display):** **`bNpcMoneyFlowEnabled`**, **`NpcSpendToPlay`**, **`NpcMaxReturnToHouse`** — read in UI from **After Target Placed Object Changed** (see `TheHousePlacedObjectSettingsWidget.h`).
+- **Sell value:** **`SellValue`** is used first when running **Sell**. If **`SellValue == 0`**, code now falls back to **`PurchasePrice`**. In practice: set **`SellValue`** only when resale must differ from buy price; otherwise leave **0** to mean “reuse purchase price”.
+
 ---
 
 ## Placement (grid, preview)
@@ -277,6 +325,82 @@ Files: `TheHouseObjectSlotUserComponent.h/.cpp`
 
 ---
 
+## NPC system (architecture)
+
+### Not the PlayerController
+
+Casino **NPCs** are not human players; they should **not** be driven by `ATheHousePlayerController`. In Unreal, an NPC is typically an **`ACharacter`** possessed by an **`AAIController`** — here **`ATheHouseNPCAIController`**. The Player Controller remains for the human player (RTS / FPS).
+
+### Categories (`ETheHouseNPCCategory`)
+
+| Value | Purpose |
+|--------|---------|
+| **`Unassigned`** | Missing or invalid archetype — fix in data. |
+| **`Staff`** | Employees: default salary (`DefaultMonthlySalary` on Staff archetype) → copied to **`StaffMonthlySalary`** on the pawn (**editable via UI**). |
+| **`Customer`** | Guests: **`StartingWallet`** → **`Wallet`**; **`OptionalAdmissionFee`** lives only on Customer archetypes (0 = off; future admission gameplay). |
+| **`Special`** | Police / EMS / scripted: **`ETheHouseNPCSpecialKind`** + **`SpecialDutyId`** on Special archetype. |
+
+The category feeds the **registry**, UI, and rules. One **C++ subclass per category** keeps unrelated fields off each asset (no admission fee on staff or police archetypes).
+
+### Data: `Source/TheHouse/NPC/Archetypes/`
+
+- **`UTheHouseNPCArchetype`** (root; avoid using alone in gameplay) — **`DisplayName`**, **`Category`** (set by subclasses). Prefer Staff / Customer / Special `.uasset` files.
+- **`UTheHouseNPCStaffArchetype`** — **`StaffRoleId`**, **`DefaultMonthlySalary`**, presentation (portrait, accent color).
+- **`UTheHouseNPCCustomerArchetype`** — **`StartingWallet`**, **`OptionalAdmissionFee`**.
+- **`UTheHouseNPCSpecialArchetype`** — **`SpecialKind`**, **`SpecialDutyId`**.
+
+Create `.uasset` instances from the matching type (**TheHouse NPC Staff Archetype**, etc.). **`NPCArchetype`** on the character remains **`UTheHouseNPCArchetype*`** (polymorphism).
+
+### Identity: `ITheHouseNPCIdentity`
+
+Lets gameplay and UI query an actor without hard-coding **`ATheHouseNPCCharacter`**:
+
+- **`GetNPCCategory`**
+- **`GetNPCArchetype`**
+
+### Character: `ATheHouseNPCCharacter`
+
+- **`NPCArchetype`** — reference to the Data Asset (set on BP or placed instance).
+- **`Wallet`** — customers; **`TrySpendFromWallet`** / **`AddToWallet`**.
+- **`StaffMonthlySalary`** — staff; initialized from **`DefaultMonthlySalary`**; **`SetStaffMonthlySalary`** for player UI.
+- **`ApplyArchetypeDefaults`** — *BlueprintNativeEvent*: fills **`Wallet`** or **`StaffMonthlySalary`** via `Cast`; call **Parent** if you override in Blueprint.
+- **`BeginPlay`:** apply defaults, then **`RegisterNPC`** on **`UTheHouseNPCSubsystem`**. **`EndPlay`:** unregister from **all** internal lists (safe if category changed).
+
+### AI: `ATheHouseNPCAIController`
+
+Dedicated NPC controller: assign **Behavior Tree**, **Blackboard**, **AI Perception**, **EQS** here when you need them. The project already uses **`UTheHouseObjectSlotUserComponent`** on the pawn for slot/object flows without requiring a minimal BT.
+
+### World registry: `UTheHouseNPCSubsystem`
+
+**`UWorldSubsystem`** helpers:
+
+- **`GetNPCsByCategory`**, **`GetNPCCountByCategory`**
+
+Useful for staff lists, stats, economy loops without a full **`TActorIterator`** each time.
+
+### Wiring to casino objects
+
+1. Configure **slots** on **`ATheHouseObject`** (see [AI: NPC slot usage](#ai-npc-slot-usage)).
+2. Add **`UTheHouseObjectSlotUserComponent`** to the NPC Blueprint parent.
+3. From BT or Blueprint, call **`UseObjectSlot`** with the correct **`PurposeTag`**.
+
+### Builds
+
+If **Live Coding** is active, builds may fail (`Unable to build while Live Coding is active`). Close the editor or disable Live Coding / use **Ctrl+Alt+F11** per your workflow.
+
+### Next steps (editor)
+
+1. Compile the **`TheHouse`** module (editor closed or Live Coding not blocking).
+2. Create **Data Assets** of the correct subclass (**Staff / Customer / Special**) per recipe (e.g. `DA_Staff_Dealer`, `DA_Customer_Standard`, `DA_Special_Police`).
+3. Create a **Blueprint** parented from **`ATheHouseNPCCharacter`**; assign **mesh**, **animation**, AnimBP, and **`NPC Archetype`**.
+4. Add the **`TheHouse Object Slot User`** component on that Blueprint for **`ATheHouseObject`** interactions (slot reservation, move, montage).
+5. Ensure the pawn uses **`ATheHouseNPCAIController`** (already the C++ default) or a **Blueprint** child if you customize BT wiring.
+6. Assign a **Behavior Tree** + **Blackboard** on the AI Controller when behavior goes beyond simple Blueprint calls.
+7. Test **`GetNPCsByCategory`** (Blueprint or C++) with several NPCs using different archetypes.
+8. Aggregate **`StaffMonthlySalary`** / **`DefaultMonthlySalary`** and customer **`Wallet`** flows into your **economy** when ready — runtime exposes **`StaffMonthlySalary`** and **`Wallet`**.
+
+---
+
 ## Smart wall
 
 Actor **`ATheHouseSmartWall`** and detailed notes: **`Docs/Features/SmartWall/README.md`** (Fill Cap, materials, etc.).
@@ -301,6 +425,8 @@ The PlayerController also logs useful **BeginPlay** info (`PlayerInput` class, E
 3. **Blueprint PC / Pawn** with **Event Tick** not calling **Parent** → C++ controller tick may not run as expected.
 4. **Double zoom:** do not add a second wheel path alongside `GameViewportClient`.
 5. **Placement:** steep surfaces rejected (`MinUpNormalZ`); no hit under cursor = invalid.
+6. **Fullscreen RTS root UMG set to `Visible`:** blocks world selection and the HUD marquee; use **`SelfHitTestInvisible`** on large containers (see RTS UI section).
+7. **Parameters panel “does not open”:** first verify **`PlacedObjectSettingsWidgetClass`** on the Player Controller BP, then the object’s **`Visibility`** collision, then **`bOpenParametersPanelOnLeftClick`** on the object BP.
 
 ---
 
@@ -314,6 +440,92 @@ The PlayerController also logs useful **BeginPlay** info (`PlayerInput` class, E
 | `Docs/Features/CasinoPlaceableObjects/README.md` | Placeable objects, BP workflow. |
 | `Docs/Features/SmartWall/README.md` | Smart wall. |
 | `Docs/Changelog/CHANGELOG.md` | Version history. |
+
+---
+
+## Localization (full command-line pipeline)
+
+The **Localization Dashboard** is still required to **create the “Game” target** once (generates `Config/Localization/Game_*.ini`). After that, prefer **`Scripts/RunLocalizationStep.ps1`** (or the thin wrappers **`GatherLocalization.ps1`** / **`CompileLocalization.ps1`**) so **`UnrealEditor-Cmd`** runs with **`-LiveCoding=false`**. Running Gather/Compile/Export from the dashboard **while the main editor is open** often triggers **Live Coding** (`Waiting for server`, pipe errors).
+
+**Gather repair:** when `-Step Gather` runs, `Game_Gather.ini` is auto-patched if the dashboard removed `SearchDirectoryPaths` / `IncludePathFilters`.
+
+### Master script: `RunLocalizationStep.ps1`
+
+Replace the project path if yours differs. Default engine: `C:\Program Files\Epic Games\UE_5.7`.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Eric\Documents\Unreal Projects\TheHouse\Scripts\RunLocalizationStep.ps1" -Step <StepName>
+```
+
+Optional engine root: append `-EngineRoot "D:\UE\UE_5.7"`.
+
+| `-Step` | Config INI | What it does (Epic commandlet chain from INI) |
+|---------|------------|-----------------------------------------------|
+| **`Gather`** | `Game_Gather.ini` | Collect strings from **C++/INI** and **assets** → manifest + archive (+ reports per INI). |
+| **`Compile`** | `Game_Compile.ini` | Build runtime text (**`.locres`**, metadata) from manifest/archive. |
+| **`Export`** | `Game_Export.ini` | Export translations (e.g. **`Game.po`**) for external translation. |
+| **`Import`** | `Game_Import.ini` | Import edited **`Game.po`** back into the archive. |
+| **`ExportDialogueScript`** | `Game_ExportDialogueScript.ini` | Export **`GameDialogue.csv`** — script/lines for voice recording or studio handoff. |
+| **`ImportDialogueScript`** | `Game_ImportDialogueScript.ini` | Re-import **`GameDialogue.csv`** after edits. |
+| **`ImportDialogue`** | `Game_ImportDialogue.ini` | **`ImportLocalizedDialogue`** — map **recorded WAVs** per culture into the dialogue pipeline (`RawAudioPath`, `ImportedDialogueFolder` in INI; adjust in dashboard or INI before use). |
+| **`Reports`** | `Game_GenerateReports.ini` | Regenerate **word-count / reports** (e.g. `Game.csv`) from current manifest data. |
+| **`RepairGatherIni`** | *(no engine run)* | Only fixes `Game_Gather.ini` paths; same as **`GatherLocalization.ps1 -RepairOnly`**. |
+
+**Wrappers (optional):** `GatherLocalization.ps1` = `-Step Gather` (+ `-RepairOnly`); `CompileLocalization.ps1` = `-Step Compile`.
+
+### Typical workflows
+
+**A — In-game text only (day-to-day)**  
+1. `Gather` → 2. `Compile`.  
+Repeat whenever you change `NSLOCTEXT` / asset text.
+
+**B — External translators (PO)**  
+1. `Gather` → 2. `Export` → *(translate `Game.po`)* → 3. `Import` → 4. `Compile`.
+
+**C — Voice / studio: dialogue script (CSV)**  
+After manifest exists: `ExportDialogueScript` → edit **`GameDialogue.csv`** / record lines → `ImportDialogueScript` → then `ImportDialogue` **once WAVs are on disk** at the paths expected by `Game_ImportDialogue.ini` (`RawAudioPath`, etc.). Finish with `Compile` if your pipeline requires updated loc resources.
+
+**D — Reports only**  
+`Reports` after a successful `Gather` (or when you need refreshed CSV counts).
+
+### Voices and audio **outside** this INI set
+
+- **Unreal dialogue import** (`ImportDialogue`) covers **localized dialogue assets** driven by Epic’s dialogue / WAV import rules — **not** automatic Wwise bank generation.
+- **Wwise (or other middleware):** language banks, sound engine switch, and packaging are **separate**; document your Wwise **language / bank** strategy in the audio chapter of your project when you add VO.
+- **MetaSound / plain `USoundWave` per folder** (`.../fr/`, `.../en/`): load by **culture** in game code or data — orthogonal to `GatherText`, but you can still use **culture** from the same `Internationalization` settings.
+
+### Equivalent engine line (any step)
+
+Same pattern; only **`-config=`** changes:
+
+```text
+"C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "C:\Users\Eric\Documents\Unreal Projects\TheHouse\TheHouse.uproject" -run=GatherText "-config=Config/Localization/Game_<StepIni>.ini" -unattended -nop4 -nosplash -NullRHI -LiveCoding=false -log
+```
+
+| Flag | Purpose |
+|------|---------|
+| `-run=GatherText` | Orchestrator commandlet: reads the INI and runs the listed localization sub-commandlets. |
+| `-config=…` | INI path **relative to project root** (scripts `cd` to the project). |
+| `-unattended` | Non-interactive batch behavior. |
+| `-nop4` | No Perforce integration for this run. |
+| `-nosplash` | No splash screen. |
+| `-NullRHI` | Headless-friendly (no full GPU stack). |
+| `-LiveCoding=false` | Avoids Live Coding broker when a second editor process starts. |
+| `-log` | Standard log output under `Saved/Logs/`. |
+
+### Copy-paste shortcuts
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Eric\Documents\Unreal Projects\TheHouse\Scripts\GatherLocalization.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Eric\Documents\Unreal Projects\TheHouse\Scripts\CompileLocalization.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Eric\Documents\Unreal Projects\TheHouse\Scripts\GatherLocalization.ps1" -RepairOnly
+```
+
+Example **export PO** after Gather:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Eric\Documents\Unreal Projects\TheHouse\Scripts\RunLocalizationStep.ps1" -Step Export
+```
 
 ---
 

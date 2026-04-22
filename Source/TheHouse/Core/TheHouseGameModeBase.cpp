@@ -36,11 +36,3 @@ void ATheHouseGameModeBase::InitGame(const FString& MapName, const FString& Opti
 		PlayerControllerClass = RequiredPC;
 	}
 }
-
-void ATheHouseGameModeBase::StartPlay()
-{
-	Super::StartPlay();
-	UE_LOG(LogTemp, Warning, TEXT("[TheHouse] Mode de jeu actif : %s | Classe du contrôleur joueur : %s"),
-		*GetClass()->GetName(),
-		PlayerControllerClass ? *PlayerControllerClass->GetName() : TEXT("nullptr"));
-}

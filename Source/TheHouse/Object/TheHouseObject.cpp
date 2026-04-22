@@ -1,18 +1,82 @@
 #include "TheHouseObject.h"
+#include "Algo/Sort.h"
 #include "Components/PrimitiveComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/MeshComponent.h"
 #include "Engine/EngineTypes.h"
+#include "Engine/OverlapResult.h"
+#include "WorldCollision.h"
 #include "EngineUtils.h"
 #include "DrawDebugHelpers.h"
 #include "Materials/MaterialInterface.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "UObject/ConstructorHelpers.h"
 #include "GameFramework/Pawn.h"
+#include "GameFramework/Character.h"
+#include "Components/SkeletalMeshComponent.h"
 
 namespace TheHouseObjectInternal
 {
 	/** Cube BasicShapes : 100 uu de côté (extents 50). */
 	static constexpr float EngineBasicCubeSideUU = 100.f;
+	/** Au-delà : pas d’overlay (évite un sol / landscape entier en rouge). */
+	static constexpr float MaxOverlayHalfExtentUU = 20000.f;
+	/** Distance max d’overlay : évite le culling RTS quand la valeur par défaut est 0. */
+	static constexpr float OverlayMaxDrawDistanceUU = 1.e12f;
+
+	static int32 EffectivePlacementBlockerCap(int32 RawMax)
+	{
+		return (RawMax > 0) ? RawMax : 6;
+	}
+}
+
+namespace TheHouseSelectionOverlayInternal
+{
+	/** MID partagé : teinte crème (blanc cassé) sur la base du matériau « placement valide », sans réutiliser l’asset tel quel sur la sélection. */
+	static UMaterialInstanceDynamic* GetOrCreateCreamSelectionOverlayMID()
+	{
+		static TWeakObjectPtr<UMaterialInstanceDynamic> Cached;
+		if (Cached.IsValid())
+		{
+			return Cached.Get();
+		}
+
+		UMaterialInterface* Parent = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/Materials/Placement/M_Placement_Valid.M_Placement_Valid"));
+		if (!Parent)
+		{
+			return nullptr;
+		}
+
+		UMaterialInstanceDynamic* Dyn = UMaterialInstanceDynamic::Create(Parent, GetTransientPackage());
+		if (!Dyn)
+		{
+			return nullptr;
+		}
+
+		const FLinearColor Cream(0.94f, 0.93f, 0.91f, 0.38f);
+		static const FName VectorParamNames[] = {
+			FName(TEXT("Color")),
+			FName(TEXT("TintColor")),
+			FName(TEXT("BaseColor")),
+			FName(TEXT("EmissiveColor")),
+			FName(TEXT("Colour")),
+			FName(TEXT("Tint")),
+		};
+		for (const FName& N : VectorParamNames)
+		{
+			Dyn->SetVectorParameterValue(N, Cream);
+		}
+		Dyn->SetScalarParameterValue(FName(TEXT("Opacity")), 0.38f);
+		Dyn->SetScalarParameterValue(FName(TEXT("OpacityScale")), 0.38f);
+
+		Cached = Dyn;
+		return Dyn;
+	}
+}
+
+UMaterialInstanceDynamic* TheHouse_GetSharedRTSSelectionCreamOverlayMID()
+{
+	return TheHouseSelectionOverlayInternal::GetOrCreateCreamSelectionOverlayMID();
 }
 
 ATheHouseObject::ATheHouseObject()
@@ -61,6 +125,11 @@ ATheHouseObject::ATheHouseObject()
 	if (!InvalidPlacementMaterial && DefaultInvalidMat.Succeeded())
 	{
 		InvalidPlacementMaterial = DefaultInvalidMat.Object;
+	}
+	// Overlay bloqueurs : visible même sans post-process d’outline (même asset que « invalid » par défaut).
+	if (!PlacementBlockerOverlayMaterial && DefaultInvalidMat.Succeeded())
+	{
+		PlacementBlockerOverlayMaterial = DefaultInvalidMat.Object;
 	}
 }
 
@@ -147,13 +216,44 @@ bool ATheHouseObject::TestFootprintOverlapsOthersAt(const FTransform& WorldTrans
 
 bool ATheHouseObject::EvaluatePlacementAt(const FTransform& WorldTransform)
 {
-	if (TestFootprintOverlapsOthersAt(WorldTransform))
+	ClearPlacementBlockerActorCaches();
+
+	const int32 BlockerCap = TheHouseObjectInternal::EffectivePlacementBlockerCap(MaxPlacementBlockerOutlines);
+
+	// --- Autres objets casino (boîte d'exclusion AABB) ---
 	{
-		PlacementState = EObjectPlacementState::OverlapsObject;
-		return false;
+		const FBox CandidateBox = GetLocalPlacementExclusionBox().TransformBy(WorldTransform);
+		bool bAny = false;
+		for (TActorIterator<ATheHouseObject> It(GetWorld()); It; ++It)
+		{
+			ATheHouseObject* Other = *It;
+			if (!Other || Other == this)
+			{
+				continue;
+			}
+
+			const FBox OtherBox = Other->GetWorldPlacementExclusionBox();
+			if (!CandidateBox.Intersect(OtherBox))
+			{
+				continue;
+			}
+
+			bAny = true;
+			if (PlacementFeedbackObjectBlockers.Num() < BlockerCap)
+			{
+				PlacementFeedbackObjectBlockers.Add(Other);
+			}
+		}
+
+		if (bAny)
+		{
+			PlacementState = EObjectPlacementState::OverlapsObject;
+			return false;
+		}
 	}
 
-	if (TestFootprintOverlapsWorldAt(WorldTransform))
+	// --- Monde (une seule requête overlap : bool + liste bornée pour le feedback) ---
+	if (TestFootprintOverlapsWorldAtWithBlockerList(WorldTransform, &PlacementFeedbackWorldBlockers, BlockerCap))
 	{
 		PlacementState = EObjectPlacementState::OverlapsWorld;
 		return false;
@@ -219,10 +319,53 @@ bool ATheHouseObject::ShouldSkipHighlightOnPrimitive(UPrimitiveComponent* Prim) 
 	return Prim && (Prim == ExclusionZoneVisualizer || Prim->IsVisualizationComponent());
 }
 
+UMaterialInterface* ATheHouseObject::ResolveSelectionOverlayMaterial() const
+{
+	if (SelectionOverlayMaterial)
+	{
+		return SelectionOverlayMaterial;
+	}
+	if (UMaterialInstanceDynamic* Mid = TheHouseSelectionOverlayInternal::GetOrCreateCreamSelectionOverlayMID())
+	{
+		return Mid;
+	}
+	return nullptr;
+}
+
+UMaterialInterface* ATheHouseObject::ResolveBlockerOverlayMaterial() const
+{
+	if (PlacementBlockerOverlayMaterial)
+	{
+		return PlacementBlockerOverlayMaterial;
+	}
+	static TWeakObjectPtr<UMaterialInterface> Cached;
+	if (!Cached.IsValid())
+	{
+		Cached = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/Materials/Placement/M_Placement_Invalid.M_Placement_Invalid"));
+	}
+	return Cached.Get();
+}
+
 void ATheHouseObject::ApplyHighlightToRenderers(bool bOn)
 {
+	if (!bOn)
+	{
+		for (const FSelectionOverlayRestore& Entry : SelectionOverlayRestoreStack)
+		{
+			if (UMeshComponent* Mesh = Entry.Mesh.Get())
+			{
+				Mesh->SetOverlayMaterial(Entry.PrevOverlay.Get());
+				if (Entry.bTouchedOverlayMaxDrawDistance)
+				{
+					Mesh->SetOverlayMaterialMaxDrawDistance(Entry.PreviousOverlayMaxDrawDistance);
+				}
+			}
+		}
+		SelectionOverlayRestoreStack.Empty();
+	}
+
 	TArray<UPrimitiveComponent*> Primitives;
-	GetComponents(Primitives);
+	GetComponents(Primitives, /*bIncludeFromChildActors*/ true);
 	for (UPrimitiveComponent* Prim : Primitives)
 	{
 		if (!Prim || ShouldSkipHighlightOnPrimitive(Prim))
@@ -233,6 +376,39 @@ void ATheHouseObject::ApplyHighlightToRenderers(bool bOn)
 		if (bOn)
 		{
 			Prim->SetCustomDepthStencilValue(HighlightStencilValue);
+		}
+	}
+
+	if (bOn)
+	{
+		SelectionOverlayRestoreStack.Empty();
+		if (UMaterialInterface* OverlayMat = ResolveSelectionOverlayMaterial())
+		{
+			for (UPrimitiveComponent* Prim : Primitives)
+			{
+				if (!Prim || ShouldSkipHighlightOnPrimitive(Prim))
+				{
+					continue;
+				}
+				UMeshComponent* MeshComp = Cast<UMeshComponent>(Prim);
+				if (!MeshComp)
+				{
+					continue;
+				}
+				if (Prim->Bounds.BoxExtent.GetMax() > TheHouseObjectInternal::MaxOverlayHalfExtentUU)
+				{
+					continue;
+				}
+
+				FSelectionOverlayRestore Restore;
+				Restore.Mesh = MeshComp;
+				Restore.PrevOverlay = MeshComp->GetOverlayMaterial();
+				Restore.bTouchedOverlayMaxDrawDistance = true;
+				Restore.PreviousOverlayMaxDrawDistance = MeshComp->GetOverlayMaterialMaxDrawDistance();
+				SelectionOverlayRestoreStack.Add(Restore);
+				MeshComp->SetOverlayMaterial(OverlayMat);
+				MeshComp->SetOverlayMaterialMaxDrawDistance(TheHouseObjectInternal::OverlayMaxDrawDistanceUU);
+			}
 		}
 	}
 }
@@ -381,10 +557,75 @@ void ATheHouseObject::UpdatePlacementVisual()
 		SetExclusionZonePreviewVisible(false);
 	}
 
-	// En preview, on applique aussi le matériau à l'objet lui-même (ghost vert/rouge).
+	// En preview : vert/rouge uniquement sur la zone d’exclusion ; le mesh garde ses matériaux d’origine.
 	if (bIsPreview)
 	{
-		ApplyPlacementMaterialToRenderers(Mat);
+		RefreshPlacementBlockerHighlights();
+	}
+	else
+	{
+		ClearPlacementBlockerHighlights();
+	}
+	DrawPlacementBlockerWireBounds();
+}
+
+void ATheHouseObject::GetActorOutlineDebugBounds(AActor* Actor, FVector& OutCenter, FVector& OutExtent)
+{
+	OutCenter = FVector::ZeroVector;
+	OutExtent = FVector::ZeroVector;
+	if (!IsValid(Actor))
+	{
+		return;
+	}
+	if (ATheHouseObject* THO = Cast<ATheHouseObject>(Actor))
+	{
+		if (THO->ObjectMesh)
+		{
+			OutCenter = THO->ObjectMesh->Bounds.Origin;
+			OutExtent = THO->ObjectMesh->Bounds.BoxExtent;
+			return;
+		}
+	}
+	// PNJ / FPS : éviter les bounds agrégées (capsule géante) utilisées pour le debug de sélection RTS.
+	if (const ACharacter* Ch = Cast<ACharacter>(Actor))
+	{
+		if (const USkeletalMeshComponent* Sk = Ch->GetMesh())
+		{
+			const FBoxSphereBounds& MB = Sk->Bounds;
+			OutCenter = MB.Origin;
+			OutExtent = MB.BoxExtent;
+			return;
+		}
+	}
+	Actor->GetActorBounds(false, OutCenter, OutExtent, /*bIncludeFromChildActors*/ true);
+}
+
+void ATheHouseObject::DrawPlacementBlockerWireBounds()
+{
+	if (!GetWorld() || !bIsPreview)
+	{
+		return;
+	}
+	if (PlacementState != EObjectPlacementState::OverlapsObject && PlacementState != EObjectPlacementState::OverlapsWorld)
+	{
+		return;
+	}
+
+	const FColor RimColor(252, 248, 240);
+	for (const TWeakObjectPtr<AActor>& W : PlacementBlockerHighlightTargets)
+	{
+		AActor* A = W.Get();
+		if (!A || A == this)
+		{
+			continue;
+		}
+		FVector Origin, Extent;
+		GetActorOutlineDebugBounds(A, Origin, Extent);
+		if (Extent.GetMax() <= KINDA_SMALL_NUMBER)
+		{
+			continue;
+		}
+		DrawDebugBox(GetWorld(), Origin, Extent, FQuat::Identity, RimColor, false, 0.f, 0, 2.5f);
 	}
 }
 
@@ -396,6 +637,14 @@ void ATheHouseObject::SetPlacementState(EObjectPlacementState NewState)
 }
 
 bool ATheHouseObject::TestFootprintOverlapsWorldAt(const FTransform& WorldTransform) const
+{
+	return TestFootprintOverlapsWorldAtWithBlockerList(WorldTransform, nullptr, 0);
+}
+
+bool ATheHouseObject::TestFootprintOverlapsWorldAtWithBlockerList(
+	const FTransform& WorldTransform,
+	TArray<TObjectPtr<AActor>>* OutSortedUniqueBlockers,
+	int32 MaxBlockersToStore) const
 {
 	UWorld* World = GetWorld();
 	if (!World)
@@ -416,13 +665,89 @@ bool ATheHouseObject::TestFootprintOverlapsWorldAt(const FTransform& WorldTransf
 		Params.AddIgnoredActor(PlacementWorldIgnoreActor);
 	}
 
-	return World->OverlapBlockingTestByChannel(
+	if (!OutSortedUniqueBlockers || MaxBlockersToStore <= 0)
+	{
+		return World->OverlapBlockingTestByChannel(
+			Center,
+			Rotation,
+			ECC_GameTraceChannel1, // PlacementBlocker
+			Shape,
+			Params
+		);
+	}
+
+	// Chemin « feedback » : test bloquant d'abord (même coût qu'avant quand la pose est valide).
+	if (!World->OverlapBlockingTestByChannel(
+			Center,
+			Rotation,
+			ECC_GameTraceChannel1,
+			Shape,
+			Params))
+	{
+		OutSortedUniqueBlockers->Reset();
+		return false;
+	}
+
+	TArray<FOverlapResult> Overlaps;
+	World->OverlapMultiByChannel(
+		Overlaps,
 		Center,
 		Rotation,
 		ECC_GameTraceChannel1, // PlacementBlocker
 		Shape,
 		Params
 	);
+
+	if (Overlaps.Num() == 0)
+	{
+		OutSortedUniqueBlockers->Reset();
+		// Bloquant détecté mais aucun résultat multi (rare) : invalide sans liste.
+		return true;
+	}
+
+	TMap<AActor*, float> ActorBestDistSq;
+	for (const FOverlapResult& O : Overlaps)
+	{
+		AActor* A = O.GetActor();
+		if (!A || A == this || A == PlacementWorldIgnoreActor)
+		{
+			continue;
+		}
+
+		const float D2 = FVector::DistSquared(A->GetActorLocation(), Center);
+		if (float* Existing = ActorBestDistSq.Find(A))
+		{
+			if (D2 < *Existing)
+			{
+				*Existing = D2;
+			}
+		}
+		else
+		{
+			ActorBestDistSq.Add(A, D2);
+		}
+	}
+
+	TArray<TPair<AActor*, float>> Sorted;
+	Sorted.Reserve(ActorBestDistSq.Num());
+	for (const TPair<AActor*, float>& Pair : ActorBestDistSq)
+	{
+		Sorted.Emplace(Pair.Key, Pair.Value);
+	}
+
+	Algo::Sort(Sorted, [](const TPair<AActor*, float>& L, const TPair<AActor*, float>& R)
+	{
+		return L.Value < R.Value;
+	});
+
+	OutSortedUniqueBlockers->Reset();
+	const int32 Limit = FMath::Min(MaxBlockersToStore, Sorted.Num());
+	for (int32 i = 0; i < Limit; ++i)
+	{
+		OutSortedUniqueBlockers->Add(Sorted[i].Key);
+	}
+
+	return true;
 }
 
 void ATheHouseObject::SetAsPreview(bool bInPreview)
@@ -436,7 +761,7 @@ void ATheHouseObject::SetAsPreview(bool bInPreview)
 	{
 		SetActorHiddenInGame(false);
 		TArray<UPrimitiveComponent*> Primitives;
-		GetComponents(Primitives);
+		GetComponents(Primitives, /*bIncludeFromChildActors*/ true);
 		for (UPrimitiveComponent* Prim : Primitives)
 		{
 			if (!Prim)
@@ -466,6 +791,8 @@ void ATheHouseObject::SetAsPreview(bool bInPreview)
 	{
 		RestoreOriginalMaterials();
 		SetExclusionZonePreviewVisible(bShowExclusionZonePreview);
+		ClearPlacementBlockerActorCaches();
+		ClearPlacementBlockerHighlights();
 	}
 }
 
@@ -496,6 +823,8 @@ void ATheHouseObject::FinalizePlacement()
 	RestoreOriginalMaterials();
 	bShowExclusionZonePreview = false;
 	SetExclusionZonePreviewVisible(false);
+	ClearPlacementBlockerActorCaches();
+	ClearPlacementBlockerHighlights();
 
 	// Safety: ensure the finalized actor is visible in game.
 	SetActorHiddenInGame(false);
@@ -504,7 +833,7 @@ void ATheHouseObject::FinalizePlacement()
 void ATheHouseObject::ApplyPreviewCollisionAndRendering(bool bEnablePreview)
 {
 	TArray<UPrimitiveComponent*> Primitives;
-	GetComponents(Primitives);
+	GetComponents(Primitives, /*bIncludeFromChildActors*/ true);
 
 	for (UPrimitiveComponent* Prim : Primitives)
 	{
@@ -548,7 +877,7 @@ void ATheHouseObject::CacheOriginalMaterialsIfNeeded()
 	}
 
 	TArray<UMeshComponent*> Meshes;
-	GetComponents(Meshes);
+	GetComponents(Meshes, /*bIncludeFromChildActors*/ true);
 	for (UMeshComponent* Mesh : Meshes)
 	{
 		if (!Mesh || Mesh == ExclusionZoneVisualizer)
@@ -593,7 +922,7 @@ void ATheHouseObject::ApplyPlacementMaterialToRenderers(UMaterialInterface* Mate
 	}
 
 	TArray<UMeshComponent*> Meshes;
-	GetComponents(Meshes);
+	GetComponents(Meshes, /*bIncludeFromChildActors*/ true);
 	for (UMeshComponent* Mesh : Meshes)
 	{
 		if (!Mesh || Mesh == ExclusionZoneVisualizer)
@@ -606,5 +935,166 @@ void ATheHouseObject::ApplyPlacementMaterialToRenderers(UMaterialInterface* Mate
 		{
 			Mesh->SetMaterial(i, MaterialOverride);
 		}
+	}
+}
+
+void ATheHouseObject::ClearPlacementBlockerActorCaches()
+{
+	PlacementFeedbackObjectBlockers.Empty();
+	PlacementFeedbackWorldBlockers.Empty();
+}
+
+void ATheHouseObject::TeardownPlacementBlockerVisualFeedback()
+{
+	ClearPlacementBlockerActorCaches();
+	ClearPlacementBlockerHighlights();
+}
+
+void ATheHouseObject::ClearPlacementBlockerHighlights()
+{
+	for (FPlacementBlockedPrimRestoreState& Entry : PlacementBlockerPrimitiveRestoreStack)
+	{
+		if (UPrimitiveComponent* Prim = Entry.Primitive.Get())
+		{
+			if (Entry.bTouchedOverlay)
+			{
+				if (UMeshComponent* Mesh = Cast<UMeshComponent>(Prim))
+				{
+					Mesh->SetOverlayMaterial(Entry.PreviousOverlay.Get());
+					if (Entry.bTouchedOverlayMaxDrawDistance)
+					{
+						Mesh->SetOverlayMaterialMaxDrawDistance(Entry.PreviousOverlayMaxDrawDistance);
+					}
+				}
+			}
+			Prim->SetRenderCustomDepth(Entry.bHadCustomDepth);
+			Prim->SetCustomDepthStencilValue(Entry.StencilValue);
+		}
+	}
+	PlacementBlockerPrimitiveRestoreStack.Empty();
+	PlacementBlockerHighlightTargets.Empty();
+}
+
+bool ATheHouseObject::PlacementBlockerHighlightTargetsMatch(const TArray<AActor*>& Desired) const
+{
+	if (Desired.Num() != PlacementBlockerHighlightTargets.Num())
+	{
+		return false;
+	}
+	for (int32 i = 0; i < Desired.Num(); ++i)
+	{
+		if (Desired[i] != PlacementBlockerHighlightTargets[i].Get())
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+void ATheHouseObject::ApplyBlockerOutlineToActor(AActor* Blocker)
+{
+	if (!Blocker || Blocker == this)
+	{
+		return;
+	}
+
+	UStaticMeshComponent* OtherExclusion = nullptr;
+	if (ATheHouseObject* OtherObj = Cast<ATheHouseObject>(Blocker))
+	{
+		OtherExclusion = OtherObj->ExclusionZoneVisualizer;
+	}
+
+	TArray<UPrimitiveComponent*> Primitives;
+	Blocker->GetComponents(Primitives, /*bIncludeFromChildActors*/ true);
+	for (UPrimitiveComponent* Prim : Primitives)
+	{
+		if (!Prim || Prim == OtherExclusion || Prim->IsVisualizationComponent())
+		{
+			continue;
+		}
+
+		FPlacementBlockedPrimRestoreState Restore;
+		Restore.Primitive = Prim;
+		Restore.bHadCustomDepth = Prim->bRenderCustomDepth;
+		Restore.StencilValue = static_cast<int32>(Prim->CustomDepthStencilValue);
+		Restore.bTouchedOverlay = false;
+
+		if (UMaterialInterface* OverlayMat = ResolveBlockerOverlayMaterial())
+		{
+			if (UMeshComponent* MeshComp = Cast<UMeshComponent>(Prim))
+			{
+				if (Prim->Bounds.BoxExtent.GetMax() <= TheHouseObjectInternal::MaxOverlayHalfExtentUU)
+				{
+					Restore.bTouchedOverlay = true;
+					Restore.PreviousOverlay = MeshComp->GetOverlayMaterial();
+					Restore.bTouchedOverlayMaxDrawDistance = true;
+					Restore.PreviousOverlayMaxDrawDistance = MeshComp->GetOverlayMaterialMaxDrawDistance();
+					MeshComp->SetOverlayMaterial(OverlayMat);
+					MeshComp->SetOverlayMaterialMaxDrawDistance(TheHouseObjectInternal::OverlayMaxDrawDistanceUU);
+				}
+			}
+		}
+
+		PlacementBlockerPrimitiveRestoreStack.Add(Restore);
+
+		Prim->SetRenderCustomDepth(true);
+		Prim->SetCustomDepthStencilValue(HighlightStencilValue);
+	}
+}
+
+void ATheHouseObject::RefreshPlacementBlockerHighlights()
+{
+	TArray<AActor*> Desired;
+	if (bIsPreview &&
+		(PlacementState == EObjectPlacementState::OverlapsObject || PlacementState == EObjectPlacementState::OverlapsWorld))
+	{
+		if (PlacementState == EObjectPlacementState::OverlapsObject)
+		{
+			for (ATheHouseObject* Obj : PlacementFeedbackObjectBlockers)
+			{
+				if (Obj && Obj != this)
+				{
+					Desired.Add(Obj);
+				}
+			}
+		}
+		else
+		{
+			for (AActor* A : PlacementFeedbackWorldBlockers)
+			{
+				if (A && A != this)
+				{
+					Desired.Add(A);
+				}
+			}
+		}
+
+		Algo::Sort(Desired, [](AActor* L, AActor* R)
+		{
+			return L < R;
+		});
+	}
+
+	if (PlacementBlockerHighlightTargetsMatch(Desired))
+	{
+		return;
+	}
+
+	ClearPlacementBlockerHighlights();
+
+	if (Desired.Num() == 0)
+	{
+		return;
+	}
+
+	for (AActor* A : Desired)
+	{
+		ApplyBlockerOutlineToActor(A);
+	}
+
+	PlacementBlockerHighlightTargets.Reserve(Desired.Num());
+	for (AActor* A : Desired)
+	{
+		PlacementBlockerHighlightTargets.Add(A);
 	}
 }

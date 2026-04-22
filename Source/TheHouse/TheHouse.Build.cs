@@ -28,7 +28,10 @@ public class TheHouse : ModuleRules
 			"TheHouse/Core", 
 			"TheHouse/Player",
 			"TheHouse/Object",
-			"TheHouse/AI"
+			"TheHouse/AI",
+			"TheHouse/NPC",
+			"TheHouse/NPC/Archetypes",
+			"TheHouse/Localization"
 		});
 
 		// Uncomment if you are using Slate UI

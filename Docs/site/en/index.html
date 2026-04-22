@@ -41,8 +41,10 @@
         <a href="#placement">Placement</a>
         <a href="#selectable">ITheHouseSelectable</a>
         <a href="#ai">AI slots</a>
+        <a href="#npc">NPC system</a>
         <a href="#debug">Debug</a>
         <a href="#pitfalls">Pitfalls</a>
+        <a href="#localization">Localization</a>
         <a href="#refs">References</a>
       </nav>
     </aside>
@@ -55,7 +57,7 @@
 
       <h2 id="vision">Game vision</h2>
       <p>Casino management / <strong>RTS</strong> (top-down camera, placement). <strong>FPS</strong> as a secondary activity — FPS does <strong>not</strong> run casino management. See <code>Docs/PROJECT_OVERVIEW.md</code> and <code>Docs/SYSTEMS.md</code>.</p>
-      <p>C++ focus: RTS camera, FPS switch, placement, selection, NPC slots, camera occlusion, walls.</p>
+      <p>C++ focus: RTS camera, FPS switch, placement, selection, NPC slots on objects, <strong>NPC foundation</strong> (archetypes, category registry), camera occlusion, walls.</p>
 
       <h2 id="archi">High-level architecture</h2>
       <pre class="ascii" aria-label="Architecture diagram">ATheHouseGameModeBase
@@ -64,7 +66,8 @@
   HUD = ATheHouseHUD
 
 UTheHouseGameViewportClient → mouse wheel → RTS zoom (before PlayerInput issues)
-ATheHousePlayerController → possesses RTS or FPS, placement, selection</pre>
+ATheHousePlayerController → possesses RTS or FPS, placement, selection
+ATheHouseNPCCharacter + ATheHouseNPCAIController → NPCs (not the PlayerController)</pre>
 
       <h2 id="tree">Source tree</h2>
       <table>
@@ -80,6 +83,11 @@ ATheHousePlayerController → possesses RTS or FPS, placement, selection</pre>
           <tr><td><code>Object/TheHouseObject</code></td><td>Placeable object, exclusion zone, NPCs.</td></tr>
           <tr><td><code>Placement/TheHousePlacementTypes.h</code></td><td><code>EPlacementState</code>.</td></tr>
           <tr><td><code>AI/TheHouseObjectSlotUserComponent</code></td><td>AI: reserve slot, MoveTo, align, montage.</td></tr>
+          <tr><td><code>NPC/TheHouseNPCTypes.h</code></td><td><code>ETheHouseNPCCategory</code>, <code>ETheHouseNPCSpecialKind</code>.</td></tr>
+          <tr><td><code>NPC/Archetypes/…</code></td><td>Data assets: root + Staff / Customer / Special.</td></tr>
+          <tr><td><code>NPC/TheHouseNPCCharacter.*</code></td><td><code>ATheHouseNPCCharacter</code> — <code>Wallet</code>, archetype.</td></tr>
+          <tr><td><code>NPC/TheHouseNPCAIController.*</code></td><td><code>ATheHouseNPCAIController</code> — BT / perception (extend).</td></tr>
+          <tr><td><code>NPC/TheHouseNPCSubsystem.*</code></td><td><code>UTheHouseNPCSubsystem</code> — list by category.</td></tr>
         </tbody>
       </table>
 
@@ -140,6 +148,12 @@ ATheHousePlayerController → possesses RTS or FPS, placement, selection</pre>
         <li>Placement: cursor preview, grid snap, Shift+wheel rotation, click confirm.</li>
         <li>Selection: HUD rect; <code>ITheHouseSelectable</code> actors → <code>OnSelect</code>.</li>
       </ul>
+      <h3>Selection / parameters panel</h3>
+      <ul>
+        <li><code>Input_SelectPressed</code> / <code>Input_SelectReleased</code> handle normal RTS left click; <code>Input_SelectDoubleClick</code> binds a real <strong>LMB double-click</strong> so the panel can reopen even if the second click is swallowed by UMG.</li>
+        <li><code>TheHouse_IsCursorOverBlockingRTSViewportUI</code> filters only UMG that should truly block world input. Fullscreen decorative containers should stay <code>SelfHitTestInvisible</code> / <code>HitTestInvisible</code>, not <code>Visible</code>.</li>
+        <li><strong>Blueprint values to set in <code>BP_HouseController</code>:</strong> <code>PlacedObjectSettingsWidgetClass</code>, <code>RTS Main Widget Class</code>, <code>RTS Context Menu Widget Class</code>.</li>
+      </ul>
       <h3>RTS ↔ FPS</h3>
       <ul>
         <li><code>SwitchToRTS</code>: cancel placement, sync RTS to FPS height, repossess RTS, destroy FPS, show cursor.</li>
@@ -165,6 +179,8 @@ ATheHousePlayerController → possesses RTS or FPS, placement, selection</pre>
         <li><strong>States:</strong> <code>EObjectPlacementState</code> (Valid, OverlapsObject, OverlapsWorld, OverlapsGrid).</li>
         <li><strong>NPCs:</strong> <code>FTheHouseNPCInteractionSlot</code> (socket + <code>PurposeTag</code>), reserve / release.</li>
         <li><strong>Selection:</strong> highlight (Custom Depth / stencil).</li>
+        <li><strong>Parameters panel:</strong> enable <code>bOpenParametersPanelOnLeftClick</code> on the object BP to allow opening from RTS click / double-click.</li>
+        <li><strong>Object economy:</strong> <code>PurchasePrice</code> = catalog buy price. <code>SellValue</code> = resale price if set; when <code>SellValue == 0</code>, selling falls back to <code>PurchasePrice</code>.</li>
       </ul>
 
       <h2 id="placement">Placement & grid</h2>
@@ -176,6 +192,23 @@ ATheHousePlayerController → possesses RTS or FPS, placement, selection</pre>
 
       <h2 id="ai">AI — <code>UTheHouseObjectSlotUserComponent</code></h2>
       <p>States: Idle, MovingToSlot, Aligned, PlayingMontage. <code>UseObjectSlot</code> reserves by tag, MoveTo via AIController, interpolated align, optional montage.</p>
+
+      <h2 id="npc">NPC system (architecture)</h2>
+      <p><strong>Full reference:</strong> <a href="../../Developer/GUIDE_EN.md#npc-system-architecture">GUIDE_EN.md → NPC system</a>.</p>
+      <p>Casino NPCs are <strong>not</strong> driven by <code>ATheHousePlayerController</code>. They use <strong><code>ATheHouseNPCAIController</code></strong> and <strong><code>ATheHouseNPCCharacter</code></strong>. Per-role data lives under <strong><code>Source/TheHouse/NPC/Archetypes/</code></strong>: root <code>UTheHouseNPCArchetype</code> (non-abstract so the asset picker lists subclasses) plus Staff / Customer / Special assets. Staff pay uses <strong><code>StaffMonthlySalary</code></strong> on the pawn (UI-editable), seeded from <code>DefaultMonthlySalary</code> on the Staff archetype. <strong><code>UTheHouseNPCSubsystem</code></strong> — <code>GetNPCsByCategory</code>. <strong><code>ITheHouseNPCIdentity</code></strong> for queries.</p>
+      <p>For tables and machines: add <strong><code>UTheHouseObjectSlotUserComponent</code></strong> to the NPC Blueprint and call <code>UseObjectSlot</code> with the same <code>PurposeTag</code> as slots on <code>ATheHouseObject</code>.</p>
+      <p><strong>Builds:</strong> close the editor or disable Live Coding if C++ compilation is blocked.</p>
+      <h3>Next steps (editor)</h3>
+      <ol>
+        <li>Compile the <code>TheHouse</code> module (no blocking Live Coding).</li>
+        <li>Create Data Assets of the right subclass (Staff / Customer / Special) under <code>NPC/Archetypes</code>.</li>
+        <li>Blueprint parent <code>ATheHouseNPCCharacter</code>: mesh, animation, <code>NPC Archetype</code>.</li>
+        <li>Add <code>TheHouse Object Slot User</code> on that Blueprint for casino objects.</li>
+        <li>Confirm AI Controller (<code>ATheHouseNPCAIController</code> or a derived BP).</li>
+        <li>Wire Behavior Tree + Blackboard on the AI Controller as needed.</li>
+        <li>Test <code>GetNPCsByCategory</code> with multiple NPCs.</li>
+        <li>Hook salaries and money flow into global economy when ready.</li>
+      </ol>
 
       <h2 id="debug">Debug</h2>
       <table>
@@ -193,7 +226,14 @@ ATheHousePlayerController → possesses RTS or FPS, placement, selection</pre>
         <li>Blueprint Event Tick without Parent on PC / Pawn.</li>
         <li>Second mouse-wheel path alongside GameViewportClient → double zoom.</li>
         <li>Steep surfaces or no hit under cursor → invalid placement.</li>
+        <li>The parameters panel “does not open”: verify <code>PlacedObjectSettingsWidgetClass</code> on the Player Controller BP, the object’s <code>Visibility</code> collision, then <code>bOpenParametersPanelOnLeftClick</code> on the object BP.</li>
       </ol>
+
+      <h2 id="localization">Localization (full pipeline)</h2>
+      <p>Create the <strong>Game</strong> target once in the <strong>Localization Dashboard</strong> (<code>Config/Localization/Game_*.ini</code>). Use <strong><code>Scripts/RunLocalizationStep.ps1</code></strong> with <code>-Step …</code> so <code>UnrealEditor-Cmd</code> runs <code>-LiveCoding=false</code> (avoids hangs when the editor is open). Full workflows (PO, dialogue CSV, import WAVs, Wwise note): <a href="../../Developer/GUIDE_EN.md#localization-full-command-line-pipeline">GUIDE_EN.md → Localization</a>.</p>
+      <p><strong>Master command</strong> (replace <code>&lt;Step&gt;</code> with <code>Gather</code>, <code>Compile</code>, <code>Export</code>, <code>Import</code>, <code>ExportDialogueScript</code>, <code>ImportDialogueScript</code>, <code>ImportDialogue</code>, <code>Reports</code>, or <code>RepairGatherIni</code>):</p>
+      <pre class="cmd"><code>powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Eric\Documents\Unreal Projects\TheHouse\Scripts\RunLocalizationStep.ps1" -Step &lt;Step&gt;</code></pre>
+      <p><strong>Shortcuts:</strong> <code>GatherLocalization.ps1</code> / <code>CompileLocalization.ps1</code>. Typical text loop: Gather → Compile. VO: ExportDialogueScript → … → ImportDialogue (configure <code>Game_ImportDialogue.ini</code> paths) → Compile. Wwise remains a separate audio pipeline.</p>
 
       <h2 id="refs">References</h2>
       <ul>

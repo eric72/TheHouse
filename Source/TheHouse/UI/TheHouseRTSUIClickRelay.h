@@ -6,13 +6,24 @@
 #include "TheHouseRTSUIClickRelay.generated.h"
 
 class ATheHousePlayerController;
+class ATheHouseNPCCharacter;
 
 UENUM()
 enum class ETheHouseRTSUIClickKind : uint8
 {
 	Catalog,
 	Stored,
-	ContextOption
+	ContextOption,
+	/** Option du menu contextuel PNJ (distinct du menu objet). */
+	ContextNPCOption,
+	/** Ordre : PNJ sélectionnés + cible objet sous le curseur. */
+	ContextNPCOrderOnObject,
+	/** Ordre : PNJ sélectionnés + cible autre PNJ sous le curseur. */
+	ContextNPCOrderOnNPC,
+	/** Ordre : PNJ sélectionnés + sol sous le curseur. */
+	ContextNPCOrderOnGround,
+	/** Palette personnel : prévisualisation / pose d’un PNJ staff (clic sur une ligne du panneau). */
+	StaffPalette
 };
 
 /**
@@ -37,10 +48,25 @@ public:
 	FName ContextOptionId;
 
 	UPROPERTY(Transient)
-	TSubclassOf<ATheHouseObject> CatalogClass;
+	TObjectPtr<ATheHouseNPCCharacter> ContextNPCTarget = nullptr;
 
 	UPROPERTY(Transient)
+	TSubclassOf<ATheHouseObject> CatalogClass;
+
+	/** Indice dans ATheHousePlayerController::StoredPlaceableStacks (ligne stock = type + quantité). */
+	UPROPERTY(Transient)
 	int32 StoredIndex = INDEX_NONE;
+
+	/** Palette PNJ staff : classe à poser + coût (voir `FTheHouseNPCStaffPaletteEntry`). */
+	UPROPERTY(Transient)
+	TSubclassOf<ATheHouseNPCCharacter> StaffNPCClass;
+
+	UPROPERTY(Transient)
+	int32 StaffNPCPaletteHireCost = 0;
+
+	/** Si ≥ 0 : indice dans `ATheHousePlayerController::NPCStaffRosterOffers` ; sinon réglage palette legacy (`StaffNPCClass`). */
+	UPROPERTY(Transient)
+	int32 StaffRosterOfferIndex = INDEX_NONE;
 
 	UFUNCTION()
 	void RelayClicked();

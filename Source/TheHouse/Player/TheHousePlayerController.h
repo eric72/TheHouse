@@ -184,14 +184,17 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Engine/HitResult.h"
 #include "GameFramework/PlayerController.h"
 #include "Placement/TheHousePlacementTypes.h"
 #include "UI/TheHouseRTSUITypes.h"
+#include "UI/TheHousePlacedObjectSettingsWidget.h"
 #include "TheHousePlayerController.generated.h"
 
 class ATheHouseCameraPawn;
 class ATheHouseFPSCharacter;
 class ATheHouseObject;
+class ATheHouseNPCCharacter;
 class UTheHouseRTSMainWidget;
 class UTheHouseRTSContextMenuWidget;
 class UTheHouseFPSHudWidget;
@@ -257,8 +260,28 @@ public:
     // =========================================================
     void TheHouse_ApplyWheelZoom(float WheelDelta);
 
-    /** Menu contextuel RTS (clic droit) — appelé aussi depuis UTheHouseGameViewportClient en Game+UI. */
+    /**
+     * Clic droit RTS : si au moins un PNJ est sélectionné au gauche — ordres sur objet / autre PNJ (menus dédiés),
+     * sinon menu PNJ « inspecter » sur PNJ seul, menu objet sur objet, sinon MoveTo au sol.
+     * Le clic droit ne sélectionne pas (la sélection reste au clic gauche).
+     */
+    UFUNCTION(BlueprintCallable, Category = "TheHouse|RTS|UI")
     void TryOpenRTSContextMenuAtCursor();
+
+    /** Ouvre le menu contextuel pour un objet déjà placé (ex. clic gauche si bOpenContextMenuWhenLeftClickObject). */
+    UFUNCTION(BlueprintCallable, Category = "TheHouse|RTS|UI")
+    void TryOpenRTSContextMenuForObject(ATheHouseObject* Obj);
+
+    /** Ouvre le menu contextuel PNJ (mêmes garde-fous que le mode RTS / Alt / etc. que l’objet). */
+    UFUNCTION(BlueprintCallable, Category = "TheHouse|RTS|UI|NPC")
+    void TryOpenRTSContextMenuForNPC(ATheHouseNPCCharacter* Npc);
+
+    /**
+     * Échap : ferme en cascade menu contextuel, prévisualisation de placement, rectangle de sélection,
+     * sélection RTS, puis appelle EscapeCloseOverlays sur le widget RTS principal (WBP).
+     * Retourne true si quelque chose a été annulé / fermé (consommer la touche pour laisser un second Échap au menu pause).
+     */
+    bool TryConsumeEscapeForRtsUi();
 
     void MoveForward(float Value);
     void MoveRight(float Value);
@@ -275,8 +298,22 @@ public:
     UFUNCTION()
     void Input_SelectReleased();
 
+    /** Double clic gauche RTS : ouvre le panneau paramètres de l’objet sous le curseur (si activé sur l’objet). */
+    UFUNCTION()
+    void Input_SelectDoubleClick();
+
     bool bIsSelecting = false;
+    /** True seulement si Input_SelectPressed a démarré un drag HUD depuis le monde (pas un clic pur sur l’UMG). */
+    bool bRtsSelectGestureFromWorld = false;
     FVector2D SelectionStartPos;
+
+    /** Acteurs actuellement « sélectionnés » (surbrillance RTS) — pour tout désélectionner avant une nouvelle sélection. */
+    TArray<TWeakObjectPtr<AActor>> RTSSelectedActors;
+
+    /** Si false : ne ferme pas le panneau paramètres objet (RTS_SelectExclusive appelle ainsi avant OpenPlacedObjectSettingsWidgetFor pour éviter destroy/recreate au même clic). Défaut : comportement précédent (fermeture). */
+    void RTS_DeselectAll(bool bClosePlacedObjectSettings = true);
+    void RTS_SelectExclusive(AActor* Actor);
+    void RTS_SelectFromBox(const TArray<AActor*>& CandidateActors);
 
     // =========================================================
     // PLACEMENT SYSTEM (DEBUG / RTS BUILD MODE)
@@ -288,19 +325,129 @@ public:
     UFUNCTION(BlueprintCallable, Category="TheHouse|RTS|Placement")
     void StartPlacementPreviewForClass(TSubclassOf<ATheHouseObject> InClass);
 
+    /** @param StoredStackIndex indice dans GetStoredPlaceableStacks() (une ligne = un type + quantité). */
     UFUNCTION(BlueprintCallable, Category="TheHouse|RTS|Placement")
-    void ConsumeStoredPlaceableAndBeginPreview(int32 StoredIndex);
+    void ConsumeStoredPlaceableAndBeginPreview(int32 StoredStackIndex);
+
+    /** Repositionne l’instance déjà sur la carte (annulation = retour à la pose initiale). Les PNJ assignés à cet objet restent sur la même instance. */
+    UFUNCTION(BlueprintCallable, Category="TheHouse|RTS|Placement")
+    void StartRelocationPreviewForPlacedObject(ATheHouseObject* PlacedObject);
 
     const TArray<FTheHousePlaceableCatalogEntry>& GetPlaceableCatalog() const { return PlaceableCatalog; }
-    const TArray<TSubclassOf<ATheHouseObject>>& GetStoredPlaceables() const { return StoredPlaceables; }
+
+    /** Stock par type (quantités). Accessible aussi en BP via la propriété StoredPlaceableStacks. */
+    const TArray<FTheHouseStoredStack>& GetStoredPlaceableStacks() const { return StoredPlaceableStacks; }
 
     const TArray<FTheHouseRTSContextMenuOptionDef>& GetRTSContextMenuOptionDefs() const { return RTSContextMenuOptionDefs; }
+
+    /** Lignes du menu contextuel PNJ (WBP dérivé de UTheHouseNPCRTSContextMenuUMGWidget). */
+    const TArray<FTheHouseRTSContextMenuOptionDef>& GetNPCRTSContextMenuOptionDefs() const { return NPCRTSContextMenuOptionDefs; }
+
+    /** Rempli à l’ouverture du menu « ordre sur objet » (voir GatherNPCOrderActionsOnObject). */
+    const TArray<FTheHouseRTSContextMenuOptionDef>& GetNPCOrderOnObjectRuntimeOptionDefs() const { return NPCOrderOnObjectRuntimeOptionDefs; }
+
+    /** Rempli à l’ouverture du menu « ordre sur autre PNJ » (voir GatherNPCOrderActionsOnNPC). */
+    const TArray<FTheHouseRTSContextMenuOptionDef>& GetNPCOrderOnNPCRuntimeOptionDefs() const { return NPCOrderOnNPCRuntimeOptionDefs; }
+
+    /** Rempli à l’ouverture du menu « ordre sur sol » (voir GatherNPCOrderActionsOnGround). */
+    const TArray<FTheHouseRTSContextMenuOptionDef>& GetNPCOrderOnGroundRuntimeOptionDefs() const { return NPCOrderOnGroundRuntimeOptionDefs; }
+
+    /** Au moins un ATheHouseNPCCharacter sélectionnable dans RTSSelectedActors (sélection clic gauche). */
+    UFUNCTION(BlueprintPure, Category = "TheHouse|RTS|UI|NPC|Orders")
+    bool HasSelectedNPCsForRTSOrders() const;
+
+    /** Copie les PNJ sélectionnés (ordre = RTSSelectedActors). */
+    UFUNCTION(BlueprintCallable, Category = "TheHouse|RTS|UI|NPC|Orders")
+    void GetSelectedNPCsForRTSOrders(TArray<ATheHouseNPCCharacter*>& OutNPCs) const;
+
+    /** Arrête tir / focus combat scripté pour les PNJ sélectionnés dont l’AIController est ATheHouseNPCAIController (sans désélectionner). */
+    UFUNCTION(BlueprintCallable, Category = "TheHouse|RTS|NPC|Combat")
+    void CancelScriptedGuardAttackOnSelectedNPCs();
+
+    // =========================================================
+    // ECONOMY
+    // =========================================================
+    UFUNCTION(BlueprintPure, Category="TheHouse|Economy")
+    int32 GetMoney() const { return Money; }
+
+    UFUNCTION(BlueprintCallable, Category="TheHouse|Economy")
+    void AddMoney(int32 Delta);
+
+    /** Fixe l’argent du joueur (≥ 0) et rafraîchit l’UI RTS. */
+    UFUNCTION(BlueprintCallable, Category="TheHouse|Economy")
+    void SetMoney(int32 NewMoney);
+
+    /** Prix catalogue : lu sur le CDO de la classe d’objet (PurchasePrice). */
+    UFUNCTION(BlueprintPure, Category="TheHouse|Economy")
+    int32 GetPurchasePriceForClass(TSubclassOf<ATheHouseObject> ObjectClass) const;
+
+    /** Suffisamment d’argent pour une pose depuis le catalogue (hors stock / hors déplacement). */
+    UFUNCTION(BlueprintPure, Category="TheHouse|Economy")
+    bool CanAffordCatalogPurchaseForClass(TSubclassOf<ATheHouseObject> ObjectClass) const;
+
+    /** Argent de départ / en cours : visible dans Class Defaults du BP qui hérite de ce PlayerController. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|Economy", meta=(ClampMin="0"))
+    int32 Money = 1000;
 
     UFUNCTION(BlueprintCallable, Category="TheHouse|RTS|UI")
     void ExecuteRTSContextMenuOption(FName OptionId, ATheHouseObject* TargetObject);
 
+    /** Exécution d’une option du menu contextuel PNJ (bouton UMG → relais). Voir TheHouseNPCContextIds. */
+    UFUNCTION(BlueprintCallable, Category="TheHouse|RTS|UI|NPC")
+    void ExecuteNPCRTSContextMenuOption(FName OptionId, ATheHouseNPCCharacter* TargetNPC);
+
+    /** Remplit OutOptionDefs (déjà vidé par l’appelant) pour le menu ordre sur objet ; surcharger en BP sur le PlayerController. */
+    UFUNCTION(BlueprintNativeEvent, Category = "TheHouse|RTS|UI|NPC|Orders")
+    void GatherNPCOrderActionsOnObject(ATheHouseObject* TargetObject, UPARAM(ref) TArray<FTheHouseRTSContextMenuOptionDef>& OutOptionDefs);
+
+    UFUNCTION(BlueprintNativeEvent, Category = "TheHouse|RTS|UI|NPC|Orders")
+    void GatherNPCOrderActionsOnNPC(ATheHouseNPCCharacter* TargetNPC, UPARAM(ref) TArray<FTheHouseRTSContextMenuOptionDef>& OutOptionDefs);
+
+    UFUNCTION(BlueprintNativeEvent, Category = "TheHouse|RTS|UI|NPC|Orders")
+    void GatherNPCOrderActionsOnGround(TArray<FTheHouseRTSContextMenuOptionDef>& OutOptionDefs);
+
+    UFUNCTION(BlueprintNativeEvent, Category = "TheHouse|RTS|UI|NPC|Orders")
+    void ExecuteNPCOrderOnObjectAction(FName OptionId, ATheHouseObject* TargetObject);
+
+    UFUNCTION(BlueprintNativeEvent, Category = "TheHouse|RTS|UI|NPC|Orders")
+    void ExecuteNPCOrderOnNPCAction(FName OptionId, ATheHouseNPCCharacter* TargetNPC);
+
+    /** Exécute une action “sol” sur le dernier point de sol détecté au clic droit (voir GetLastNPCOrderGroundTarget). */
+    UFUNCTION(BlueprintNativeEvent, Category = "TheHouse|RTS|UI|NPC|Orders")
+    void ExecuteNPCOrderOnGroundAction(FName OptionId);
+
+    UFUNCTION(BlueprintPure, Category = "TheHouse|RTS|UI|NPC|Orders")
+    FVector GetLastNPCOrderGroundTarget() const { return LastNPCOrderGroundTarget; }
+
+    /** Appeler depuis le menu ordres PNJ (ex. relay UMG) avant ExecuteNPCOrder* : le relâchement LMB qui suit ne doit pas vider la sélection RTS. */
+    UFUNCTION(BlueprintCallable, Category = "TheHouse|RTS|UI|NPC|Orders")
+    void NotifyRtsOrderMenuOptionClickedFromUi();
+
     UFUNCTION(BlueprintCallable, Category="TheHouse|RTS|UI")
     void RefreshRTSMainWidget();
+
+    /** Ferme le WBP de paramètres d’objet casino (bouton Fermer dans le WBP). */
+    UFUNCTION(BlueprintCallable, Category="TheHouse|RTS|UI")
+    void ClosePlacedObjectSettingsPanel();
+
+    /** Accès lecture seule pour un WBP de panneau Personnel (RTS Main Widget : hors « protected » pour les widgets UObject). */
+    UFUNCTION(BlueprintPure, Category="TheHouse|RTS|NPC|Palette")
+    const TArray<FTheHouseNPCStaffPaletteEntry>& GetNPCStaffPalette() const { return NPCStaffPalette; }
+
+    UFUNCTION(BlueprintPure, Category="TheHouse|RTS|NPC|Recruitment")
+    const TArray<FTheHouseNPCStaffRosterOffer>& GetNPCStaffRosterOffers() const { return NPCStaffRosterOffers; }
+
+    /** Régénère les candidats à l’embauche (appel automatique au BeginPlay si le bassin n’est pas vide). */
+    UFUNCTION(BlueprintCallable, Category="TheHouse|RTS|NPC|Recruitment")
+    void RefreshNPCStaffRecruitmentOffers();
+
+    /** Démarre la prévisualisation de pose d’un staff (annule la prévisualisation d’objet si besoin). */
+    UFUNCTION(BlueprintCallable, Category="TheHouse|RTS|NPC|Palette")
+    void StartStaffNpcPlacementFromPalette(TSubclassOf<ATheHouseNPCCharacter> NPCClass, int32 HireCost = 0);
+
+    /** Prévisualisation à partir d’une ligne du roster (`NPCStaffRosterOffers`). */
+    UFUNCTION(BlueprintCallable, Category="TheHouse|RTS|NPC|Recruitment")
+    void StartStaffNpcPlacementFromRosterOffer(int32 RosterOfferIndex);
 
 protected:
 
@@ -316,10 +463,27 @@ protected:
     UPROPERTY()
     ATheHouseObject* PreviewActor = nullptr;
 
+    /** Offre staff en cours (palette legacy ou ligne roster) — utilisée au confirm pour classe, coût et stats. */
+    UPROPERTY()
+    FTheHouseNPCStaffRosterOffer PendingStaffSpawnOffer;
+
+    UPROPERTY()
+    ATheHouseNPCCharacter* StaffPlacementPreviewNpc = nullptr;
+
+    bool bStaffNpcPlacementLocationValid = false;
+
+    void ConfigureStaffNpcDeferredFromOffer(ATheHouseNPCCharacter* Npc, const FTheHouseNPCStaffRosterOffer& Offer) const;
+
     void SpawnPlacementPreviewFromPendingClass();
 
     void UpdatePlacementPreview();
+    void UpdateStaffNpcPlacementPreview();
     bool ValidatePlacement(const FHitResult& Hit) const;
+
+    void ConfirmStaffNpcPlacement();
+
+    /** Au moins un acteur dans RTSSelectedActors différent de Exclude (pour menus ordres sur PNJ). */
+    bool HasRTSSelectionActorOtherThan(const AActor* Exclude) const;
 
     // =========================================================
     // GRID PLACEMENT
@@ -343,6 +507,8 @@ protected:
     bool AreAnyCellsOccupied(const TArray<FIntPoint>& Cells) const;
     void MarkCellsOccupied(const TArray<FIntPoint>& Cells);
     void MarkCellsFree(const TArray<FIntPoint>& Cells);
+
+    void AddOrIncrementStoredStock(TSubclassOf<ATheHouseObject> ClassToStore);
 
     // =========================================================
     // CAMERA / PAWN REFERENCES
@@ -368,8 +534,25 @@ protected:
     /** Front montant RMB pour le poll (Game+UI). */
     bool bPrevPollRMBHeld = false;
 
-    /** Anti double ouverture menu même frame (BindAction + poll). */
-    double LastRTSContextMenuOpenDebounceSeconds = -1.0;
+    /** Front LMB (RTS) : même raison que RMB — PlayerInput / BindAction peuvent ne pas voir le clic en Game+UI. */
+    bool bPrevPollLMBHeld = false;
+
+    /** Anti double press/release quand BindAction et le poll déclenchent le même front dans le même instant monde. */
+    double LastRtsLmbSelectPressDedupeTimeSeconds = -1.0;
+    double LastRtsLmbSelectReleaseDedupeTimeSeconds = -1.0;
+
+    /** Après un choix dans le menu ordres (UMG), le relâchement LMB peut arriver une fois le menu fermé : sans cela, Input_SelectReleased appelle RTS_DeselectAll(). */
+    bool bRtsSuppressNextSelectReleaseWorldPick = false;
+
+    /** Le timer de poll peut tourner >1× dans le même « instant » monde : éviter double toggle (équivalent sans GFrameCounter). */
+    double LastRTSContextMenuRMBHandledTimeSeconds = -1.0;
+
+    /** Dernière ouverture réussie du menu contextuel (écart minimal entre deux TryOpen). */
+    double LastRTSContextMenuTryOpenTimeSeconds = -1.0;
+
+    /** Dernier relâchement gauche RTS sur un objet avec panneau paramètres (voir `Input_SelectReleased`, repli double-clic). */
+    double LastRtsParamPanelObjectReleaseTimeSeconds = -1.0;
+    TWeakObjectPtr<ATheHouseObject> LastRtsParamPanelObjectRelease;
 
     void ClampRtsPawnAboveGround(ATheHouseCameraPawn* Cam);
 
@@ -429,11 +612,28 @@ protected:
     // =========================================================
     // UI (RTS / FPS)
     // =========================================================
-    UPROPERTY(EditDefaultsOnly, Category="TheHouse|UI|RTS")
+    /** WBP dont le parent est TheHouse RTS Main Widget (avec MoneyText / CatalogScroll / StoredScroll), ou laisser vide pour le layout C++ par défaut. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|UI|RTS")
     TSubclassOf<UTheHouseRTSMainWidget> RTSMainWidgetClass;
 
     UPROPERTY(EditDefaultsOnly, Category="TheHouse|UI|RTS")
-    TSubclassOf<UTheHouseRTSContextMenuWidget> RTSContextMenuWidgetClass;
+    TSubclassOf<UUserWidget> RTSContextMenuWidgetClass;
+
+    /** WBP hérité de UTheHouseNPCRTSContextMenuUMGWidget (laisser vide = classe C++ par défaut en InitializeModeWidgets). */
+    UPROPERTY(EditDefaultsOnly, Category="TheHouse|UI|RTS|NPC", meta=(DisplayName="Menu contextuel PNJ (classe)"))
+    TSubclassOf<UUserWidget> NPCRTSContextMenuWidgetClass;
+
+    /** WBP hérité de UTheHouseNPCOrderContextMenuUMGWidget : menu ordres (PNJ sélectionnés + clic droit sur objet / autre PNJ). */
+    UPROPERTY(EditDefaultsOnly, Category="TheHouse|UI|RTS|NPC|Orders", meta=(DisplayName="Menu ordres PNJ (classe)"))
+    TSubclassOf<UUserWidget> NPCOrderContextMenuWidgetClass;
+
+    /** WBP hérité de UTheHousePlacedObjectSettingsWidget : ouvert seulement si l’objet a bOpenParametersPanelOnLeftClick. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|UI|RTS")
+    TSubclassOf<UTheHousePlacedObjectSettingsWidget> PlacedObjectSettingsWidgetClass;
+
+    /** Si true, un clic gauche qui sélectionne un objet ouvre aussi le menu contextuel (en plus du panneau de config). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|UI|RTS")
+    bool bOpenContextMenuWhenLeftClickObject = false;
 
     UPROPERTY(EditDefaultsOnly, Category="TheHouse|UI|FPS")
     TSubclassOf<UTheHouseFPSHudWidget> FPSHudWidgetClass;
@@ -441,29 +641,127 @@ protected:
     UPROPERTY(EditDefaultsOnly, Category="TheHouse|UI|RTS")
     TArray<FTheHousePlaceableCatalogEntry> PlaceableCatalog;
 
-    /** Objets retirés de la carte (classes) — réutilisables depuis le panneau Stock. */
-    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="TheHouse|UI|RTS")
-    TArray<TSubclassOf<ATheHouseObject>> StoredPlaceables;
+    /** Palette PNJ staff (panneau Personnel du RTS Main Widget) : clic = prévisualisation puis clic gauche pour poser.
+     * Utilisée seulement si `NPCStaffRosterOffers` est vide après `RefreshNPCStaffRecruitmentOffers`. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|UI|RTS|NPC|Palette")
+    TArray<FTheHouseNPCStaffPaletteEntry> NPCStaffPalette;
 
-    /** Options du menu contextuel (clic droit sur un ATheHouseObject placé). Delete / Store sont gérés en C++. */
+    /** Bassin recrutement : à chaque `RefreshNPCStaffRecruitmentOffers`, remplit `NPCStaffRosterOffers`. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|UI|RTS|NPC|Recruitment")
+    TArray<FTheHouseNPCStaffPoolSlotDef> NPCStaffRecruitmentPool;
+
+    /** Offres courantes affichées dans le panneau Personnel (prioritaire sur la palette statique). */
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="TheHouse|UI|RTS|NPC|Recruitment")
+    TArray<FTheHouseNPCStaffRosterOffer> NPCStaffRosterOffers;
+
+    /** Stock par type : quantité décrémentée quand un objet issu du stock est replacé et confirmé. */
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="TheHouse|UI|RTS")
+    TArray<FTheHouseStoredStack> StoredPlaceableStacks;
+
+    /** Options du menu contextuel (clic droit sur un ATheHouseObject placé). Delete / Store / Relocate sont gérés en C++.
+     * Tableau vide dans un BP enfant : à l’exécution on ajoute Vendre, Mettre en stock, puis Déplacer (Relocate) si absent
+     * via EnsureDefaultRTSContextMenuDefs (BeginPlay + ouverture du menu). */
     UPROPERTY(EditDefaultsOnly, Category="TheHouse|UI|RTS")
     TArray<FTheHouseRTSContextMenuOptionDef> RTSContextMenuOptionDefs;
+
+    /**
+     * Options affichées par le menu PNJ. Ids stables (TheHouseNPCContextIds) + libellés localisables.
+     * Si le tableau BP est vide au runtime, EnsureDefaultNPCRTSContextMenuDefs ajoute InspectNPC et UsePlacedObjectAtCursor.
+     */
+    UPROPERTY(EditDefaultsOnly, Category="TheHouse|UI|RTS|NPC")
+    TArray<FTheHouseRTSContextMenuOptionDef> NPCRTSContextMenuOptionDefs;
+
+    /** Rempli à chaque ouverture du menu ordre sur objet (GatherNPCOrderActionsOnObject). */
+    UPROPERTY(Transient, BlueprintReadOnly, Category="TheHouse|UI|RTS|NPC|Orders")
+    TArray<FTheHouseRTSContextMenuOptionDef> NPCOrderOnObjectRuntimeOptionDefs;
+
+    /** Rempli à chaque ouverture du menu ordre sur autre PNJ (GatherNPCOrderActionsOnNPC). */
+    UPROPERTY(Transient, BlueprintReadOnly, Category="TheHouse|UI|RTS|NPC|Orders")
+    TArray<FTheHouseRTSContextMenuOptionDef> NPCOrderOnNPCRuntimeOptionDefs;
+
+    /** Rempli à chaque ouverture du menu ordre sur sol (GatherNPCOrderActionsOnGround). */
+    UPROPERTY(Transient, BlueprintReadOnly, Category="TheHouse|UI|RTS|NPC|Orders")
+    TArray<FTheHouseRTSContextMenuOptionDef> NPCOrderOnGroundRuntimeOptionDefs;
+
+    /** Dernier point sol capturé au clic droit (utilisé par ExecuteNPCOrderOnGroundAction). */
+    UPROPERTY(Transient, BlueprintReadOnly, Category="TheHouse|UI|RTS|NPC|Orders")
+    FVector LastNPCOrderGroundTarget = FVector::ZeroVector;
 
     UPROPERTY(Transient)
     TObjectPtr<UTheHouseRTSMainWidget> RTSMainWidgetInstance;
 
     UPROPERTY(Transient)
-    TObjectPtr<UTheHouseRTSContextMenuWidget> RTSContextMenuInstance;
+    TObjectPtr<UUserWidget> RTSContextMenuInstance;
+
+    UPROPERTY(Transient)
+    TObjectPtr<UUserWidget> RTSNPCContextMenuInstance;
+
+    UPROPERTY(Transient)
+    TObjectPtr<UUserWidget> RTSNPCOrderOnObjectMenuInstance;
+
+    UPROPERTY(Transient)
+    TObjectPtr<UUserWidget> RTSNPCOrderOnNPCMenuInstance;
+
+    UPROPERTY(Transient)
+    TObjectPtr<UUserWidget> RTSNPCOrderOnGroundMenuInstance;
+
+    bool AnyRTSContextMenuOpen() const
+    {
+        return RTSContextMenuInstance != nullptr || RTSNPCContextMenuInstance != nullptr
+            || RTSNPCOrderOnObjectMenuInstance != nullptr || RTSNPCOrderOnNPCMenuInstance != nullptr
+            || RTSNPCOrderOnGroundMenuInstance != nullptr;
+    }
 
     UPROPERTY(Transient)
     TObjectPtr<UTheHouseFPSHudWidget> FPSHudWidgetInstance;
 
-    /** Si différent de INDEX_NONE, une entrée stock sera consommée au placement confirmé. */
+    UPROPERTY(Transient)
+    TObjectPtr<UTheHousePlacedObjectSettingsWidget> PlacedObjectSettingsWidgetInstance = nullptr;
+
+    /** Dernière cible liée au panneau paramètres — permet de réutiliser le même WBP même si un BP vidait la cible dans le widget entre deux clics. */
+    TWeakObjectPtr<ATheHouseObject> PlacedObjectSettingsLastBoundObject;
+
+    /** Si différent de INDEX_NONE, indice dans StoredPlaceableStacks : une unité sera retirée au placement confirmé. */
     int32 PendingStockConsumeIndex = INDEX_NONE;
+
+    /** Preview = déplacement d’un objet déjà placé (ne pas Destroy au Cancel). */
+    bool bRelocationPreviewActive = false;
+
+    /** Pose sauvegardée avant déplacement (restaurée si Annuler). */
+    FTransform RelocationRestoreTransform;
 
     void InitializeModeWidgets();
     void UpdateModeWidgetsVisibility();
+    /** Ferme les menus contextuels RTS (objet, PNJ, ordres) et restaure l’input jeu si besoin. */
     void CloseRTSContextMenu();
+    void ClosePlacedObjectSettingsWidget();
+    void OpenPlacedObjectSettingsWidgetFor(ATheHouseObject* Obj);
+
+    FVector2D TheHouse_GetContextMenuViewportPosition() const;
+    void TheHouse_OpenRTSContextMenuShared(ATheHouseObject* Obj, const FVector2D& MenuScreenPos);
+    void TheHouse_OpenRTSContextMenuForNPCShared(ATheHouseNPCCharacter* Npc, const FVector2D& MenuScreenPos);
+    void TheHouse_OpenNPCOrderOnObjectMenuShared(ATheHouseObject* Obj, const FVector2D& MenuScreenPos);
+    void TheHouse_OpenNPCOrderOnNPCMenuShared(ATheHouseNPCCharacter* Npc, const FVector2D& MenuScreenPos);
+    void TheHouse_OpenNPCOrderOnGroundMenuShared(const FVector& GroundLocation, const FVector2D& MenuScreenPos);
+
+    bool IsActorInRTSSelection(AActor* Actor) const;
+
+    /** Ordre MoveTo (NavMesh) pour chaque PNJ actuellement dans RTSSelectedActors. */
+    void IssueMoveOrdersToSelectedNPCsAtLocation(const FVector& GoalLocation);
+
+    /**
+     * True si le curseur est sur de l’UMG qui doit absorber le clic (ne pas démarrer le drag HUD ni tracer la sélection monde).
+     * Menu contextuel / panneau paramètres : test géométrie (fenêtre). Panneau RTS principal : chemin Slate + hit-test
+     * ESlateVisibility::Visible sur la chaîne UMG (évite un root WBP plein écran qui bloquait tout via IsUnderLocation).
+     */
+    bool TheHouse_IsCursorOverBlockingRTSViewportUI() const;
+
+    /**
+     * Fenêtres modales uniquement : menus contextuels objet/PNJ/ordres + panneau paramètres objet.
+     * À utiliser pour la sélection/désélection monde : sinon le HUD RTS principal marque souvent tout l’écran comme « bloquant »
+     * et aucune trace monde ne s’exécute (voir Input_SelectPressed / Released).
+     */
+    bool TheHouse_IsModalRtsUiBlockingWorldSelection() const;
 
     /** Alt physique : rotation RTS ; on n’ouvre pas le menu contextuel sur RMB pendant Alt. */
     bool IsRtsCameraRotateModifierPhysicallyDown() const;
@@ -477,11 +775,34 @@ protected:
     UFUNCTION()
     void Input_RTSObjectContext();
 
-    void RTS_DeletePlacedObject(ATheHouseObject* Obj);
+    void RTS_SellPlacedObject(ATheHouseObject* Obj);
     void RTS_StorePlacedObject(ATheHouseObject* Obj);
 
     void EnsureDefaultRTSContextMenuDefs();
+    void EnsureDefaultNPCRTSContextMenuDefs();
+
+    /** Fusionne les traces souris (cohérence PNJ vs objet vs sol) — une entrée par acteur, distance minimale. */
+    void CollectMergedRTSLineHitsUnderCursor(TMap<AActor*, FHitResult>& OutBestHitPerActor) const;
+
+    /** Sol « marchable » depuis les hits fusionnés, sinon trace WorldStatic simple. */
+    bool TryResolveGroundClickLocation(const TMap<AActor*, FHitResult>& MergedHits, FVector& OutLocation) const;
+
+    /**
+     * Clic simple : acteur ITheHouseSelectable le plus proche le long du rayon, via les mêmes traces
+     * que le menu contextuel (sinon Visibility seul ne touche souvent pas le profil Pawn / le mesh).
+     */
+    AActor* FindPrimarySelectableActorUnderCursorRTS() const;
+
+    /** Après GetActorsInSelectionRectangle, ajoute les PNJ manquants (test AABB écran du mesh). */
+    void AppendSelectableNPCsIntersectingRTSBox(const FVector2D& RectCornerA, const FVector2D& RectCornerB, TArray<AActor*>& InOutActors) const;
 
     UFUNCTION(BlueprintNativeEvent, Category="TheHouse|UI|RTS")
     void HandleRTSContextMenuOption(FName OptionId, ATheHouseObject* TargetObject);
+
+    /**
+     * Tous les OptionId du menu PNJ non gérés en C++ dans ExecuteNPCRTSContextMenuOption
+     * (ex. InspectNPC, règles métier) : surclassez en Blueprint sur le PlayerController.
+     */
+    UFUNCTION(BlueprintNativeEvent, Category="TheHouse|UI|RTS|NPC")
+    void HandleNPCRTSContextMenuOption(FName OptionId, ATheHouseNPCCharacter* TargetNPC);
 };

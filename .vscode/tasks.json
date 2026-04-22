@@ -1,0 +1,27 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "UE: Refresh VS Code / Cursor IntelliSense",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"${workspaceFolder}/Scripts/RefreshVSCodeIntellisense.ps1"
+			],
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"focus": false
+			},
+			"group": {
+				"kind": "build",
+				"isDefault": false
+			}
+		}
+	]
+}

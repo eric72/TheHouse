@@ -1,8 +1,13 @@
+/.cache
+/.git
+/.vs
 /.vscode
+/ai
 /Content
 /DerivedDataCache
 /Docs
 /Documentation
 /Intermediate
 /Saved
+/Scripts
 /Tools

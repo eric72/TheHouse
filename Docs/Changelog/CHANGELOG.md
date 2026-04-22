@@ -8,6 +8,10 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/). Les
 
 ### Documentation
 
+- **PNJ / NPC:** architecture documentée dans `Docs/Developer/GUIDE_FR.md` et `Docs/Developer/GUIDE_EN.md` ; archetypes refactorés en **`NPC/Archetypes/`** (`UTheHouseNPCArchetype` racine + Staff / Customer / Special ; racine non abstraite pour le picker d’assets), **`StaffMonthlySalary`** runtime sur le personnage ; même résumé sur `Docs/site/`.
+- **Localisation :** `Scripts/RunLocalizationStep.ps1` (toutes les étapes dashboard : Gather, Compile, Export/Import PO, dialogue script CSV, import dialogue WAV, rapports) ; guides `GUIDE_FR.md` / `GUIDE_EN.md` et pages `Docs/site/` mises à jour ; `GatherLocalization.ps1` / `CompileLocalization.ps1` délèguent au script maître.
+- **RTS UI :** section *panneau principal (`RTS Main Widget Class`) vs menu contextuel (`RTS Context Menu Widget Class`)* dans `Docs/Developer/GUIDE_FR.md` et `Docs/Developer/GUIDE_EN.md` (table des matières mise à jour).
+- **RTS catalogue / stock :** champ optionnel **`Thumbnail`** sur `FTheHousePlaceableCatalogEntry` + affichage vignette dans les listes du widget RTS principal (`TheHouseRTSMainWidget.cpp`).
 - Guide développeur C++ bilingue : `Docs/Developer/GUIDE_FR.md`, `Docs/Developer/GUIDE_EN.md`, index `Docs/Developer/README.md` ; site statique `Docs/site/` (navigation + sélecteur de langue en bas à droite).
 - Structure `Docs/` : `Features/<Nom>/README.md` par fonctionnalité, `Changelog/CHANGELOG.md` pour les mises à jour.
 - Déplacement de la doc « objets casino » vers `Docs/Features/CasinoPlaceableObjects/README.md`.

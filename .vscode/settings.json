@@ -1,3 +1,11 @@
 {
-	"C_Cpp.default.compileCommands": "${workspaceFolder}/compile_commands.json"
+	"C_Cpp.default.compileCommands": "${workspaceFolder}/.vscode/compileCommands_TheHouse.json",
+	"C_Cpp.default.cppStandard": "c++20",
+	"C_Cpp.default.cStandard": "c17",
+	"C_Cpp.default.intelliSenseMode": "windows-msvc-x64",
+	"C_Cpp.default.mergeConfigurations": true,
+	"C_Cpp.default.browse.limitSymbolsToIncludedHeaders": false,
+	"C_Cpp.autocomplete": "default",
+	"C_Cpp.enhancedColorization": "enabled",
+	"C_Cpp.errorSquiggles": "enabled"
 }

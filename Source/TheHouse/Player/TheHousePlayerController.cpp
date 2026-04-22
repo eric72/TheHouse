@@ -2,7 +2,10 @@
 
 #include "TheHousePlayerController.h"
 #include "Blueprint/UserWidget.h"
+#include "Blueprint/SlateBlueprintLibrary.h"
+#include "Blueprint/WidgetLayoutLibrary.h"
 #include "Components/InputComponent.h"
+#include "EnhancedInputComponent.h"
 #include "Engine/GameViewportClient.h"
 #include "Engine/LocalPlayer.h"
 #include "Framework/Application/SlateApplication.h"
@@ -12,8 +15,18 @@
 #include "InputCoreTypes.h"
 #include "Kismet/GameplayStatics.h"
 #include "TheHouseObject.h"
+#include "AIController.h"
+#include "NavigationSystem.h"
+#include "AI/TheHouseObjectSlotUserComponent.h"
+#include "TheHouse/NPC/TheHouseNPCCharacter.h"
+#include "TheHouse/NPC/TheHouseNPCIdentity.h"
+#include "TheHouse/NPC/TheHouseNPCEjectRegionVolume.h"
+#include "TheHouse/NPC/TheHouseNPCAIController.h"
 #include "UI/TheHouseFPSHudWidget.h"
+#include "UI/TheHouseNPCRTSContextMenuUMGWidget.h"
+#include "UI/TheHouseNPCOrderContextMenuUMGWidget.h"
 #include "UI/TheHouseRTSContextMenuWidget.h"
+#include "UI/TheHouseRTSContextMenuUMGWidget.h"
 #include "UI/TheHouseRTSMainWidget.h"
 #include "UI/TheHouseRTSUITypes.h"
 #include "TheHouse/Core/TheHouseHUD.h"
@@ -22,11 +35,78 @@
 #include "TheHouseFPSCharacter.h"
 #include "TimerManager.h"
 #include "HAL/IConsoleManager.h"
+#include "Layout/WidgetPath.h"
+#include "Slate/SObjectWidget.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Components/PanelWidget.h"
+#include "Components/Widget.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "CollisionQueryParams.h"
+#include "DrawDebugHelpers.h"
+#include "Components/BoxComponent.h"
 
+namespace TheHouseNPCOrdersInternal
+{
+	static ATheHouseNPCEjectRegionVolume* FindSmallestEjectVolumeContaining(UWorld* World, const FVector& WorldLocation)
+	{
+		if (!World)
+		{
+			return nullptr;
+		}
+
+		ATheHouseNPCEjectRegionVolume* Best = nullptr;
+		float BestVol = BIG_NUMBER;
+		for (TActorIterator<ATheHouseNPCEjectRegionVolume> It(World); It; ++It)
+		{
+			ATheHouseNPCEjectRegionVolume* Vol = *It;
+			if (!IsValid(Vol) || !Vol->ContainsWorldLocation(WorldLocation))
+			{
+				continue;
+			}
+
+			float VolMetric = 0.f;
+			if (UBoxComponent* B = Vol->EjectBox)
+			{
+				const FVector E = B->GetScaledBoxExtent();
+				VolMetric = E.X * E.Y * E.Z;
+			}
+
+			if (VolMetric < BestVol)
+			{
+				BestVol = VolMetric;
+				Best = Vol;
+			}
+		}
+		return Best;
+	}
+
+	static bool ProjectPointToNavOrKeep(UWorld* World, const FVector& InGoal, FVector& OutGoal)
+	{
+		if (!World)
+		{
+			OutGoal = InGoal;
+			return false;
+		}
+
+		if (UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World))
+		{
+			FNavLocation NavLoc;
+			const FVector QueryExtent(500.f, 500.f, 1200.f);
+			if (NavSys->ProjectPointToNavigation(InGoal, NavLoc, QueryExtent))
+			{
+				OutGoal = NavLoc.Location;
+				return true;
+			}
+		}
+
+		OutGoal = InGoal;
+		return false;
+	}
+} // namespace TheHouseNPCOrdersInternal
 
 namespace {
 	/** En Game+UI le focus clavier reste souvent sur un widget Slate : ZQSD
@@ -38,6 +118,128 @@ namespace {
 	}
 	}
 } // namespace
+
+/** Vrai si la chaîne parent UMG contient un nœud qui absorbe le hit-test (clic monde bloqué). */
+static bool TheHouse_UmgChainHasHitTestAbsorbingVisibility(const UWidget* Leaf)
+{
+	if (!Leaf)
+	{
+		return false;
+	}
+	// GetParent() renvoie UPanelWidget*, pas UWidget* : on remonte via Cast<UWidget>(...).
+	for (UWidget* W = const_cast<UWidget*>(Leaf); W != nullptr; W = Cast<UWidget>(W->GetParent()))
+	{
+		const ESlateVisibility V = W->GetVisibility();
+		if (V == ESlateVisibility::Visible)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+/** Feuille UMG sous le curseur : est-elle dans l’un des panneaux RTS listés avec au moins un ancêtre Visible (hit-testable) ? */
+static bool TheHouse_LeafUmgBlocksWorldForRtsPanels(
+	UWidget* Leaf,
+	const UTheHouseRTSMainWidget* RTSMain,
+	const UUserWidget* RTSContext,
+	const UUserWidget* RTSNPCContext,
+	const UTheHousePlacedObjectSettingsWidget* Settings,
+	const UUserWidget* RTSOrderObjContext,
+	const UUserWidget* RTSOrderNpcContext,
+	const UUserWidget* RTSOrderGroundContext)
+{
+	if (!Leaf)
+	{
+		return false;
+	}
+
+	const bool bInMain =
+		RTSMain && Leaf->GetTypedOuter<UTheHouseRTSMainWidget>() == RTSMain;
+	const bool bInContext =
+		RTSContext && Leaf->GetTypedOuter<UUserWidget>() == RTSContext;
+	const bool bInNPCContext =
+		RTSNPCContext && Leaf->GetTypedOuter<UUserWidget>() == RTSNPCContext;
+	const bool bInSettings =
+		Settings && Leaf->GetTypedOuter<UTheHousePlacedObjectSettingsWidget>() == Settings;
+	const bool bInOrderObj =
+		RTSOrderObjContext && Leaf->GetTypedOuter<UUserWidget>() == RTSOrderObjContext;
+	const bool bInOrderNpc =
+		RTSOrderNpcContext && Leaf->GetTypedOuter<UUserWidget>() == RTSOrderNpcContext;
+	const bool bInOrderGround =
+		RTSOrderGroundContext && Leaf->GetTypedOuter<UUserWidget>() == RTSOrderGroundContext;
+
+	if (!bInMain && !bInContext && !bInNPCContext && !bInSettings && !bInOrderObj && !bInOrderNpc && !bInOrderGround)
+	{
+		return false;
+	}
+
+	return TheHouse_UmgChainHasHitTestAbsorbingVisibility(Leaf);
+}
+
+/** Slate sous la souris : SObjectWidget + hit-test UMG réel (évite IsUnderLocation sur la géométrie plein écran du WBP racine). */
+static bool TheHouse_SlatePathBlocksRtsWorldSelection(
+	const FWidgetPath& Path,
+	const UTheHouseRTSMainWidget* RTSMain,
+	const UUserWidget* RTSContext,
+	const UUserWidget* RTSNPCContext,
+	const UTheHousePlacedObjectSettingsWidget* Settings,
+	const UUserWidget* RTSOrderObjContext,
+	const UUserWidget* RTSOrderNpcContext,
+	const UUserWidget* RTSOrderGroundContext)
+{
+	if (!Path.IsValid() || Path.Widgets.Num() == 0)
+	{
+		return false;
+	}
+
+	for (int32 i = Path.Widgets.Num() - 1; i >= 0; --i)
+	{
+		const TSharedRef<SWidget>& SlateRef = Path.Widgets[i].Widget;
+		const TSharedPtr<SWidget> S = SlateRef;
+		if (!S.IsValid())
+		{
+			continue;
+		}
+
+		if (!S->GetTypeAsString().StartsWith(TEXT("SObjectWidget")))
+		{
+			continue;
+		}
+
+		const TSharedPtr<SObjectWidget> ObjWidget = StaticCastSharedPtr<SObjectWidget>(S);
+		if (!ObjWidget.IsValid())
+		{
+			continue;
+		}
+
+		if (UUserWidget* HostWidget = ObjWidget->GetWidgetObject())
+		{
+			if (TheHouse_LeafUmgBlocksWorldForRtsPanels(
+					HostWidget,
+					RTSMain,
+					RTSContext,
+					RTSNPCContext,
+					Settings,
+					RTSOrderObjContext,
+					RTSOrderNpcContext,
+					RTSOrderGroundContext))
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+/** Écart max (s) entre deux relâchements pour traiter un 2e clic quand le 2e press n’a pas démarré `bRtsSelectGestureFromWorld` (UMG au-dessus). */
+static constexpr double TheHouse_RtsParamPanelSecondClickGapSeconds = 0.45;
+
+/** Deux passages du poll au même GetTimeSeconds() monde (p.ex. même frame) → tolérance stricte. */
+static constexpr double TheHouse_RTSContextMenuSameInstantEpsilon = 1.e-6;
+
+/** Évite plusieurs TryOpen à la suite (ticks du timer ~120 Hz ; 1e-6 s ne suffisait pas). */
+static constexpr double TheHouse_RTSContextMenuTryOpenMinIntervalSeconds = 0.08;
 
 namespace TheHousePlacementDebug
 {
@@ -64,6 +266,38 @@ namespace TheHouseFPSDebug
 	static bool IsEnabled()
 	{
 		return CVarFPSDebug.GetValueOnGameThread() != 0;
+	}
+}
+
+namespace TheHouseRTSContextDebug
+{
+	static TAutoConsoleVariable<int32> CVarContextDebug(
+		TEXT("TheHouse.RTS.ContextMenu.Debug"),
+		0,
+		TEXT("0=off, 1=on-screen logs for RTS context menu open/pick"),
+		ECVF_Default);
+
+	static bool IsEnabled()
+	{
+		return CVarContextDebug.GetValueOnGameThread() != 0;
+	}
+
+	static void Screen(APlayerController* PC, const FString& Msg, FColor Color = FColor::Yellow)
+	{
+#if !UE_BUILD_SHIPPING
+		if (!IsEnabled())
+		{
+			return;
+		}
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 2.5f, Color, Msg);
+		}
+		if (IsValid(PC))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("%s"), *Msg);
+		}
+#endif
 	}
 }
 
@@ -172,6 +406,20 @@ void ATheHousePlayerController::TheHouse_ApplyWheelZoom(float WheelDelta) {
   // Molette via GameViewportClient : pivot du preview avec **TheHouseRTSZoomModifier** (Shift)
   // ou **TheHousePlacementRotateModifier** (Ctrl). Shift désactive le zoom caméra.
   if (PlacementState == EPlacementState::Previewing && GetPawn() == RTSPawnReference &&
+      StaffPlacementPreviewNpc && (bShiftMod || bCtrlPivotMod))
+  {
+    const float Step = FMath::Clamp(PlacementRotationStepDegrees, 1.f, 180.f);
+    const float Sign = FMath::Sign(WheelDelta);
+    if (!FMath::IsNearlyZero(Sign))
+    {
+      PlacementPreviewYawDegrees =
+          FMath::UnwindDegrees(PlacementPreviewYawDegrees + Sign * Step);
+      UpdateStaffNpcPlacementPreview();
+    }
+    return;
+  }
+
+  if (PlacementState == EPlacementState::Previewing && GetPawn() == RTSPawnReference &&
       PreviewActor && (bShiftMod || bCtrlPivotMod))
   {
     const float Step = FMath::Clamp(PlacementRotationStepDegrees, 1.f, 180.f);
@@ -264,36 +512,15 @@ void ATheHousePlayerController::BeginPlay() {
 
 	SetIgnoreMoveInput(false);
 
-	UE_LOG(LogTemp, Error,
-			TEXT("[TheHouse] Révision entrées 2026-04-03 | PlayerInput=%s | Si tu "
-				"vois « EnhancedPlayerInput », DefaultInput.ini est encore en "
-				"Enhanced — ZQSD/zoom resteront cassés."),
-			PlayerInput ? *PlayerInput->GetClass()->GetName() : TEXT("null"));
-
-	UE_LOG(LogTemp, Warning,
-			TEXT("[TheHouse] Contrôleur joueur (BeginPlay) | classe=%s | pion=%s "
-				"| LocalPlayer=%s | LocalController=%s"),
-			*GetClass()->GetName(),
-			GetPawn() ? *GetPawn()->GetClass()->GetName() : TEXT("(aucun)"),
-			IsLocalPlayerController() ? TEXT("oui") : TEXT("non"),
-			IsLocalController() ? TEXT("oui") : TEXT("non"));
-
-	#if !UE_BUILD_SHIPPING
-	if (GEngine) {
-		GEngine->AddOnScreenDebugMessage(
-			-1, 14.f, FColor::Cyan,
-			FString::Printf(
-				TEXT("[TheHouse] Entrées = timer (pas seulement Tick) | %s | Pion "
-					": %s | Si rien ne change : BP Event Tick doit appeler "
-					"Parent, ou Mode de jeu ≠ TheHouse."),
-				*GetClass()->GetName(),
-				GetPawn() ? *GetPawn()->GetClass()->GetName() : TEXT("(aucun)")));
-	}
-	#endif
-
 	TheHouse_StartInputPollTimer();
 
+	// Live Coding / hot reload : éviter qu’un cooldown ou un poll RMB reste dans un état bloquant.
+	LastRTSContextMenuTryOpenTimeSeconds = -1.0;
+	LastRTSContextMenuRMBHandledTimeSeconds = -1.0;
+
 	EnsureDefaultRTSContextMenuDefs();
+	EnsureDefaultNPCRTSContextMenuDefs();
+	RefreshNPCStaffRecruitmentOffers();
 	InitializeModeWidgets();
 }
 
@@ -312,11 +539,6 @@ void ATheHousePlayerController::TheHouse_StartInputPollTimer() {
   GetWorldTimerManager().SetTimer(
       TheHouseInputPollTimer, this,
       &ATheHousePlayerController::TheHouse_PollInputFrame, 1.f / 120.f, true);
-  UE_LOG(LogTemp, Warning,
-         TEXT("[TheHouse] Timer d'entrées démarré (120 Hz) sur %s | "
-              "LocalController=%s"),
-         *GetClass()->GetName(),
-         IsLocalController() ? TEXT("oui") : TEXT("non"));
 }
 
 void ATheHousePlayerController::EndPlay(
@@ -440,6 +662,18 @@ void ATheHousePlayerController::Tick(float DeltaTime) {
     }
   }
 
+  // Safety: if we somehow got stuck in UIOnly, restore normal RTS input mode
+  // when no context menu is open.
+  if (Cast<ATheHouseCameraPawn>(GetPawn()) == RTSPawnReference && RTSPawnReference &&
+      !bIsRotateModifierDown && !AnyRTSContextMenuOpen())
+  {
+    bShowMouseCursor = true;
+    FInputModeGameAndUI InputMode;
+    InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+    InputMode.SetHideCursorDuringCapture(false);
+    SetInputMode(InputMode);
+  }
+
   // if (IsInputKeyDown(EKeys::P))
   // {
   //   UE_LOG(LogTemp, Warning, TEXT("P DETECTED VIA TICK"));
@@ -480,29 +714,102 @@ void ATheHousePlayerController::TheHouse_PollInputFrame() {
     }
   }
 
-  // Menu contextuel RTS : Game+UI mange souvent InputKey avant le jeu ; front montant
-  // via l’état physique (comme mouvement) + BindAction("RTSObjectContext").
+  // Menu contextuel RTS : en Game+UI, PlayerInput peut ne pas voir RMB ; on utilise
+  // l’état physique (poll). Ne PAS aussi binder RTSObjectContext sur RMB : sinon le
+  // même front montant ouvre via BindAction puis ce bloc voit le menu ouvert et le
+  // ferme (toggle) dans la même frame → fenêtre invisible.
+  //
+  // Ne pas utiliser WasInputKeyJustPressed ici : le poll peut tourner plusieurs fois
+  // par frame (120 Hz) et le fallback re-déclenche ouverture/fermeture en rafale.
+  // Un seul traitement du front montant par « instant » monde (sans GFrameCounter — UE 5.7+).
   {
-    const bool bRMB = TheHouseInputPoll::IsKeyPhysicallyDown(this, EKeys::RightMouseButton);
-    if (!bPrevPollRMBHeld && bRMB && Cast<ATheHouseCameraPawn>(GetPawn()) == RTSPawnReference &&
-        RTSPawnReference && !IsRtsCameraRotateModifierPhysicallyDown())
+		// Physique + PlayerInput : avec Enhanced Input / focus, la touche « physique » seule peut rester à faux.
+		const bool bPhysRMB = TheHouseInputPoll::IsKeyPhysicallyDown(this, EKeys::RightMouseButton);
+		const bool bKeyRMB = IsInputKeyDown(EKeys::RightMouseButton);
+		const bool bRMB = bPhysRMB || bKeyRMB;
+		const bool bRising = (!bPrevPollRMBHeld && bRMB);
+
+		if (bRising &&
+			Cast<ATheHouseCameraPawn>(GetPawn()) != nullptr &&
+			!IsRtsCameraRotateModifierPhysicallyDown())
     {
-      TryOpenRTSContextMenuAtCursor();
+      const double NowSec = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
+      const bool bDuplicateSameInstant =
+          LastRTSContextMenuRMBHandledTimeSeconds >= 0.0 &&
+          FMath::IsNearlyEqual(NowSec, LastRTSContextMenuRMBHandledTimeSeconds, TheHouse_RTSContextMenuSameInstantEpsilon);
+      if (!bDuplicateSameInstant)
+      {
+        LastRTSContextMenuRMBHandledTimeSeconds = NowSec;
+        // Toggle: if already open, close; otherwise open.
+        if (AnyRTSContextMenuOpen())
+        {
+          CloseRTSContextMenu();
+        }
+        else
+        {
+          TryOpenRTSContextMenuAtCursor();
+        }
+      }
+    }
+    else if (bRising && TheHouseRTSContextDebug::IsEnabled())
+    {
+      TheHouseRTSContextDebug::Screen(
+        this,
+        FString::Printf(TEXT("[RTSContext] RMB detected but ignored | RTS cam=%s | Alt=%s | Pawn=%s"),
+          Cast<ATheHouseCameraPawn>(GetPawn()) ? TEXT("yes") : TEXT("no"),
+          IsRtsCameraRotateModifierPhysicallyDown() ? TEXT("yes") : TEXT("no"),
+          GetPawn() ? *GetPawn()->GetName() : TEXT("null")),
+        FColor::Silver);
     }
     bPrevPollRMBHeld = bRMB;
+  }
+
+  // Clic gauche RTS : en Game+UI, le même symptôme que RMB (seuls Échap / chemins hors BindAction semblaient fiables).
+  {
+    const bool bPhysLMB = TheHouseInputPoll::IsKeyPhysicallyDown(this, EKeys::LeftMouseButton);
+    const bool bKeyLMB = IsInputKeyDown(EKeys::LeftMouseButton);
+    const bool bLMB = bPhysLMB || bKeyLMB;
+    const bool bLMBRising = (!bPrevPollLMBHeld && bLMB);
+    const bool bLMBFalling = (bPrevPollLMBHeld && !bLMB);
+
+    if (Cast<ATheHouseCameraPawn>(GetPawn()) != nullptr && !IsRtsCameraRotateModifierPhysicallyDown())
+    {
+      if (bLMBRising)
+      {
+        Input_SelectPressed();
+      }
+      if (bLMBFalling)
+      {
+        Input_SelectReleased();
+      }
+    }
+    bPrevPollLMBHeld = bLMB;
   }
 }
 
 void ATheHousePlayerController::SetupInputComponent() {
-  // Force classic UInputComponent: project INI / editor often reset to
-  // EnhancedInputComponent, which breaks legacy BindAction here.
-  if (InputComponent == nullptr) {
+  // Le parent crée InputComponent depuis DefaultInputComponentClass (souvent Enhanced si l’INI a été réécrit).
+  APlayerController::SetupInputComponent();
+
+  // Les BindAction legacy (« Select », etc.) exigent UPlayerInput + UInputComponent.
+  if (InputComponent && InputComponent->IsA(UEnhancedInputComponent::StaticClass()))
+  {
+#if !UE_BUILD_SHIPPING
+    UE_LOG(LogTemp, Warning,
+      TEXT("[TheHouse] PlayerController : remplacement de %s par UInputComponent (vérifie DefaultInput.ini : DefaultInputComponentClass)."),
+      *InputComponent->GetClass()->GetName());
+#endif
+    InputComponent->UnregisterComponent();
+    InputComponent->DestroyComponent();
+    InputComponent = nullptr;
+  }
+
+  if (InputComponent == nullptr)
+  {
     InputComponent = NewObject<UInputComponent>(
         this, UInputComponent::StaticClass(), TEXT("PC_InputComponent0"));
     InputComponent->RegisterComponent();
   }
-
-  APlayerController::SetupInputComponent();
 
   // MoveForward/MoveRight : on force leur écoute native continue !
   // (Indispensable pour GameOnly en mode FPS)
@@ -535,10 +842,31 @@ void ATheHousePlayerController::SetupInputComponent() {
 
   // Selection / confirmation (Left click). If we are in placement preview,
   // clicking confirms instead of selecting.
-  InputComponent->BindAction("Select", IE_Pressed, this,
-                             &ATheHousePlayerController::Input_SelectPressed);
-  InputComponent->BindAction("Select", IE_Released, this,
-                             &ATheHousePlayerController::Input_SelectReleased);
+  {
+    FInputActionBinding& Press = InputComponent->BindAction(
+      "Select",
+      IE_Pressed,
+      this,
+      &ATheHousePlayerController::Input_SelectPressed);
+    Press.bConsumeInput = false; // let Slate/UMG receive the click too
+
+    FInputActionBinding& Rel = InputComponent->BindAction(
+      "Select",
+      IE_Released,
+      this,
+      &ATheHousePlayerController::Input_SelectReleased);
+    Rel.bConsumeInput = false;
+  }
+
+  // Double click (Left mouse) : ouvrir le panneau paramètres même si le 2e press est absorbé par l’UMG.
+  {
+    FInputKeyBinding& Dbl = InputComponent->BindKey(
+      EKeys::LeftMouseButton,
+      IE_DoubleClick,
+      this,
+      &ATheHousePlayerController::Input_SelectDoubleClick);
+    Dbl.bConsumeInput = false;
+  }
 
   InputComponent->BindAction(
       "CancelOrCloseRts",
@@ -546,11 +874,8 @@ void ATheHousePlayerController::SetupInputComponent() {
       this,
       &ATheHousePlayerController::Input_CancelOrCloseRts);
 
-  InputComponent->BindAction(
-      "RTSObjectContext",
-      IE_Pressed,
-      this,
-      &ATheHousePlayerController::Input_RTSObjectContext);
+  // RTSObjectContext (RMB) : volontairement NON bindé ici — géré uniquement par
+  // TheHouse_PollInputFrame (voir commentaire au-dessus du bloc RMB).
 }
 
 void ATheHousePlayerController::DebugStartPlacement()
@@ -590,19 +915,130 @@ void ATheHousePlayerController::DebugStartPlacement()
 		return;
 	}
 
+	if (!CanAffordCatalogPurchaseForClass(PendingPlacementClass))
+	{
+		if (TheHousePlacementDebug::IsEnabled())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Placement] P ignored: pas assez d'argent pour %s"), *GetNameSafe(PendingPlacementClass));
+		}
+		return;
+	}
+
+	RTS_DeselectAll();
 	SpawnPlacementPreviewFromPendingClass();
 }
 
 void ATheHousePlayerController::CancelPlacement()
 {
+	if (StaffPlacementPreviewNpc)
+	{
+		StaffPlacementPreviewNpc->Destroy();
+		StaffPlacementPreviewNpc = nullptr;
+	}
+	PendingStaffSpawnOffer = FTheHouseNPCStaffRosterOffer();
+	bStaffNpcPlacementLocationValid = false;
+
 	if (PreviewActor)
 	{
-		PreviewActor->Destroy();
-		PreviewActor = nullptr;
+		if (bRelocationPreviewActive)
+		{
+			PreviewActor->SetActorTransform(RelocationRestoreTransform);
+			TArray<FIntPoint> Cells;
+			GetFootprintCellsForTransform(PreviewActor, PreviewActor->GetActorTransform(), Cells);
+			MarkCellsOccupied(Cells);
+			PreviewActor->FinalizePlacement();
+			PreviewActor = nullptr;
+		}
+		else
+		{
+			PreviewActor->TeardownPlacementBlockerVisualFeedback();
+			PreviewActor->Destroy();
+			PreviewActor = nullptr;
+		}
 	}
+	bRelocationPreviewActive = false;
 	PlacementState = EPlacementState::None;
 	PlacementPreviewYawDegrees = 0.f;
 	PendingStockConsumeIndex = INDEX_NONE;
+}
+
+void ATheHousePlayerController::RTS_DeselectAll(bool bClosePlacedObjectSettings)
+{
+	for (TWeakObjectPtr<AActor>& W : RTSSelectedActors)
+	{
+		if (AActor* A = W.Get())
+		{
+			if (ATheHouseNPCCharacter* Npc = Cast<ATheHouseNPCCharacter>(A))
+			{
+				if (ATheHouseNPCAIController* HouseAI = Cast<ATheHouseNPCAIController>(Npc->GetController()))
+				{
+					HouseAI->ClearScriptedAttackOrder();
+				}
+			}
+			if (ITheHouseSelectable* S = Cast<ITheHouseSelectable>(A))
+			{
+				S->OnDeselect();
+			}
+		}
+	}
+	RTSSelectedActors.Reset();
+	if (bClosePlacedObjectSettings)
+	{
+		ClosePlacedObjectSettingsWidget();
+	}
+	LastRtsParamPanelObjectReleaseTimeSeconds = -1.0;
+	LastRtsParamPanelObjectRelease.Reset();
+}
+
+void ATheHousePlayerController::CancelScriptedGuardAttackOnSelectedNPCs()
+{
+	for (const TWeakObjectPtr<AActor>& W : RTSSelectedActors)
+	{
+		if (ATheHouseNPCCharacter* Npc = Cast<ATheHouseNPCCharacter>(W.Get()))
+		{
+			if (ATheHouseNPCAIController* HouseAI = Cast<ATheHouseNPCAIController>(Npc->GetController()))
+			{
+				HouseAI->ClearScriptedAttackOrder();
+			}
+		}
+	}
+}
+
+void ATheHousePlayerController::RTS_SelectExclusive(AActor* Actor)
+{
+	RTS_DeselectAll(/*bClosePlacedObjectSettings=*/false);
+	if (!IsValid(Actor) || !Actor->Implements<UTheHouseSelectable>())
+	{
+		ClosePlacedObjectSettingsWidget();
+		return;
+	}
+	ITheHouseSelectable* S = Cast<ITheHouseSelectable>(Actor);
+	if (!S || !S->IsSelectable())
+	{
+		ClosePlacedObjectSettingsWidget();
+		return;
+	}
+	S->OnSelect();
+	RTSSelectedActors.Add(Actor);
+}
+
+void ATheHousePlayerController::RTS_SelectFromBox(const TArray<AActor*>& CandidateActors)
+{
+	RTS_DeselectAll();
+	for (AActor* A : CandidateActors)
+	{
+		if (!IsValid(A) || !A->Implements<UTheHouseSelectable>())
+		{
+			continue;
+		}
+		ITheHouseSelectable* S = Cast<ITheHouseSelectable>(A);
+		if (!S || !S->IsSelectable())
+		{
+			continue;
+		}
+		S->OnSelect();
+		RTSSelectedActors.AddUnique(A);
+	}
 }
 
 void ATheHousePlayerController::SpawnPlacementPreviewFromPendingClass()
@@ -611,6 +1047,8 @@ void ATheHousePlayerController::SpawnPlacementPreviewFromPendingClass()
 	{
 		return;
 	}
+
+	RTS_DeselectAll();
 
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride =
@@ -656,6 +1094,10 @@ void ATheHousePlayerController::StartPlacementPreviewForClass(TSubclassOf<ATheHo
 	{
 		return;
 	}
+	if (!CanAffordCatalogPurchaseForClass(InClass))
+	{
+		return;
+	}
 
 	PendingStockConsumeIndex = INDEX_NONE;
 	PendingPlacementClass = InClass;
@@ -663,17 +1105,81 @@ void ATheHousePlayerController::StartPlacementPreviewForClass(TSubclassOf<ATheHo
 	SpawnPlacementPreviewFromPendingClass();
 }
 
-void ATheHousePlayerController::ConsumeStoredPlaceableAndBeginPreview(int32 StoredIndex)
+void ATheHousePlayerController::AddOrIncrementStoredStock(TSubclassOf<ATheHouseObject> ClassToStore)
 {
-	if (!StoredPlaceables.IsValidIndex(StoredIndex))
+	if (!ClassToStore)
+	{
+		return;
+	}
+	for (FTheHouseStoredStack& Stack : StoredPlaceableStacks)
+	{
+		if (Stack.ObjectClass == ClassToStore)
+		{
+			++Stack.Count;
+			return;
+		}
+	}
+	FTheHouseStoredStack NewStack;
+	NewStack.ObjectClass = ClassToStore;
+	NewStack.Count = 1;
+	StoredPlaceableStacks.Add(NewStack);
+}
+
+void ATheHousePlayerController::ConsumeStoredPlaceableAndBeginPreview(int32 StoredStackIndex)
+{
+	if (!StoredPlaceableStacks.IsValidIndex(StoredStackIndex))
+	{
+		return;
+	}
+	const FTheHouseStoredStack& Stack = StoredPlaceableStacks[StoredStackIndex];
+	if (!Stack.ObjectClass || Stack.Count <= 0)
 	{
 		return;
 	}
 
-	PendingPlacementClass = StoredPlaceables[StoredIndex];
+	PendingPlacementClass = Stack.ObjectClass;
 	CancelPlacement();
-	PendingStockConsumeIndex = StoredIndex;
+	PendingStockConsumeIndex = StoredStackIndex;
 	SpawnPlacementPreviewFromPendingClass();
+}
+
+void ATheHousePlayerController::StartRelocationPreviewForPlacedObject(ATheHouseObject* PlacedObject)
+{
+	if (!RTSPawnReference || GetPawn() != RTSPawnReference)
+	{
+		return;
+	}
+	if (!IsValid(PlacedObject) || PlacedObject->IsPlacementPreviewActor())
+	{
+		return;
+	}
+
+	CancelPlacement();
+
+	RTSSelectedActors.RemoveAllSwap([&](const TWeakObjectPtr<AActor>& W)
+	{
+		return W.Get() == PlacedObject;
+	});
+
+	RelocationRestoreTransform = PlacedObject->GetActorTransform();
+	TArray<FIntPoint> OldCells;
+	GetFootprintCellsForTransform(PlacedObject, RelocationRestoreTransform, OldCells);
+	MarkCellsFree(OldCells);
+
+	PreviewActor = PlacedObject;
+	PendingStockConsumeIndex = INDEX_NONE;
+	PendingPlacementClass = TSubclassOf<ATheHouseObject>(PlacedObject->GetClass());
+
+	PlacementPreviewYawDegrees = PlacedObject->GetActorRotation().Yaw;
+
+	PreviewActor->SetAsPreview(true);
+	PlacementState = EPlacementState::Previewing;
+	bRelocationPreviewActive = true;
+
+	if (ITheHouseSelectable* Sel = Cast<ITheHouseSelectable>(PlacedObject))
+	{
+		Sel->OnDeselect();
+	}
 }
 
 #pragma endregion
@@ -945,6 +1451,7 @@ void ATheHousePlayerController::SwitchToRTS() {
   TheHouse_FocusKeyboardOnGameViewport();
 
   CloseRTSContextMenu();
+  ClosePlacedObjectSettingsWidget();
   UpdateModeWidgetsVisibility();
 }
 
@@ -956,6 +1463,7 @@ void ATheHousePlayerController::SwitchToFPS(FVector TargetLocation, FRotator Tar
 	// Placement preview is RTS-only.
 	CancelPlacement();
 	CloseRTSContextMenu();
+	ClosePlacedObjectSettingsWidget();
 
 	// TargetLocation est déjà le sol réel fourni par DebugSwitchToFPS
 	// (via GetHitResultUnderCursor). On ajoute juste la demi-hauteur capsule.
@@ -1107,21 +1615,58 @@ void ATheHousePlayerController::DebugSwitchToFPS() {
 
 
 void ATheHousePlayerController::Input_SelectPressed() {
+  if (Cast<ATheHouseCameraPawn>(GetPawn()) != nullptr)
+  {
+    const UWorld* W = GetWorld();
+    const double NowSec = W ? W->GetTimeSeconds() : 0.0;
+    if (LastRtsLmbSelectPressDedupeTimeSeconds >= 0.0 &&
+        FMath::IsNearlyEqual(NowSec, LastRtsLmbSelectPressDedupeTimeSeconds,
+                             TheHouse_RTSContextMenuSameInstantEpsilon))
+    {
+      return;
+    }
+    LastRtsLmbSelectPressDedupeTimeSeconds = NowSec;
+  }
+
+  bRtsSelectGestureFromWorld = false;
+
+  // Si le menu contextuel est ouvert, on laisse l'UI recevoir le clic (Slate).
+  // Ne PAS fermer ici : sinon le bouton ne reçoit jamais l'événement.
+  if (AnyRTSContextMenuOpen())
+  {
+    return;
+  }
   // While rotating (ALT / RMB), left click should not start selection nor confirm placement.
   if (bIsRotateModifierDown) {
     return;
   }
 
-  if (PlacementState == EPlacementState::Previewing) {
-    ConfirmPlacement();
+  if (PlacementState == EPlacementState::Previewing)
+  {
+    if (StaffPlacementPreviewNpc)
+    {
+      ConfirmStaffNpcPlacement();
+    }
+    else if (PreviewActor)
+    {
+      ConfirmPlacement();
+    }
     return;
   }
   if (!RTSPawnReference || GetPawn() != RTSPawnReference)
     return;
 
+  // Menus contextuels / panneau paramètres uniquement — pas le Slate « chrome » du HUD RTS (sinon aucun clic monde).
+  if (TheHouse_IsModalRtsUiBlockingWorldSelection())
+  {
+    return;
+  }
+
   // Start Selection
   float MouseX, MouseY;
   if (GetMousePosition(MouseX, MouseY)) {
+    bRtsSuppressNextSelectReleaseWorldPick = false;
+    bRtsSelectGestureFromWorld = true;
     bIsSelecting = true;
     SelectionStartPos = FVector2D(MouseX, MouseY);
 
@@ -1133,8 +1678,39 @@ void ATheHousePlayerController::Input_SelectPressed() {
 }
 
 void ATheHousePlayerController::Input_SelectReleased() {
+  if (Cast<ATheHouseCameraPawn>(GetPawn()) != nullptr)
+  {
+    const UWorld* W = GetWorld();
+    const double NowSec = W ? W->GetTimeSeconds() : 0.0;
+    if (LastRtsLmbSelectReleaseDedupeTimeSeconds >= 0.0 &&
+        FMath::IsNearlyEqual(NowSec, LastRtsLmbSelectReleaseDedupeTimeSeconds,
+                             TheHouse_RTSContextMenuSameInstantEpsilon))
+    {
+      return;
+    }
+    LastRtsLmbSelectReleaseDedupeTimeSeconds = NowSec;
+  }
+
+  const bool bGestureFromWorld = bRtsSelectGestureFromWorld;
+  bRtsSelectGestureFromWorld = false;
+
+  // If context menu is open, do not run selection logic.
+  if (AnyRTSContextMenuOpen())
+  {
+    bIsSelecting = false;
+    if (ATheHouseHUD* HUD = Cast<ATheHouseHUD>(GetHUD()))
+    {
+      HUD->StopSelection();
+    }
+    return;
+  }
   // While rotating (ALT / RMB), ignore selection release too.
   if (bIsRotateModifierDown) {
+    bIsSelecting = false;
+    if (ATheHouseHUD* HUD = Cast<ATheHouseHUD>(GetHUD()))
+    {
+      HUD->StopSelection();
+    }
     return;
   }
 
@@ -1145,6 +1721,12 @@ void ATheHousePlayerController::Input_SelectReleased() {
     HUD->StopSelection();
   }
 
+  if (bRtsSuppressNextSelectReleaseWorldPick)
+  {
+    bRtsSuppressNextSelectReleaseWorldPick = false;
+    return;
+  }
+
   if (!IsValid(RTSPawnReference) || GetPawn() != RTSPawnReference)
     return;
 
@@ -1153,7 +1735,48 @@ void ATheHousePlayerController::Input_SelectReleased() {
     return;
 
   FVector2D CurrentMousePos(MouseX, MouseY);
-  float DragDistance = FVector2D::Distance(SelectionStartPos, CurrentMousePos);
+  // Sans drag HUD « monde » (press sur UMG, etc.) : traiter comme clic ponctuel pour pouvoir désélectionner
+  // au relâchement sur la carte (sinon le return bloquait tout le bloc ci‑dessous).
+  const float DragDistance =
+      bGestureFromWorld ? FVector2D::Distance(SelectionStartPos, CurrentMousePos) : 0.f;
+
+  // Exception : 2e relâchement rapide sur le même objet casino alors que le 2e press a été mangé par l’UMG.
+  if (!bGestureFromWorld)
+  {
+    if (PlacementState != EPlacementState::Previewing && PlacedObjectSettingsWidgetClass)
+    {
+      if (UWorld* World = GetWorld())
+      {
+        FHitResult Hit;
+        if (GetHitResultUnderCursor(ECC_Visibility, false, Hit))
+        {
+          if (ATheHouseObject* Obj = Cast<ATheHouseObject>(Hit.GetActor()))
+          {
+            if (Obj->bOpenParametersPanelOnLeftClick && !Obj->IsPlacementPreviewActor() &&
+                Obj->Implements<UTheHouseSelectable>())
+            {
+              if (ITheHouseSelectable* Sel = Cast<ITheHouseSelectable>(Obj))
+              {
+                if (Sel->IsSelectable())
+                {
+                  const double Now = World->GetTimeSeconds();
+                  if (LastRtsParamPanelObjectRelease.Get() == Obj &&
+                      LastRtsParamPanelObjectReleaseTimeSeconds >= 0.0 &&
+                      (Now - LastRtsParamPanelObjectReleaseTimeSeconds) <= TheHouse_RtsParamPanelSecondClickGapSeconds)
+                  {
+                    RTS_SelectExclusive(Obj);
+                    OpenPlacedObjectSettingsWidgetFor(Obj);
+                    LastRtsParamPanelObjectReleaseTimeSeconds = Now;
+                    LastRtsParamPanelObjectRelease = Obj;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 
   // Log for debug
   // UE_LOG(LogTemp, Log, TEXT("Selection Released. Drag Dist: %f"),
@@ -1161,29 +1784,42 @@ void ATheHousePlayerController::Input_SelectReleased() {
 
   if (DragDistance < 10.0f) // Small movement = Single Click
   {
-    // Single Click Selection
-    // KEY POINT: We use ECC_Visibility.
-    // Our SmartWall disables its Visibility collision when faded, so this trace
-    // will naturally ignore it!
-    FHitResult Hit;
-    if (GetHitResultUnderCursor(ECC_Visibility, false, Hit)) {
-      AActor *HitActor = Hit.GetActor();
+    // Traces monde (pas Slate) : un panneau UMG plein écran hit-testable bloquait avant tout le bloc,
+    // donc un clic « sur la carte » ne désélectionnait jamais tant que le panneau paramètres était ouvert.
+    AActor* const HitActor = FindPrimarySelectableActorUnderCursorRTS();
 
-      // Check Interface AND IsSelectable condition
-      // We access the interface via the ITheHouseSelectable pointer to call the
-      // virtual function correctly
-      if (HitActor && HitActor->Implements<UTheHouseSelectable>()) {
-        ITheHouseSelectable *Selectable = Cast<ITheHouseSelectable>(HitActor);
-        if (Selectable && Selectable->IsSelectable()) {
-          // Deselect all others first (Simple logic for now)
-          // TODO: Implement Multi-Select with Shift
-          // For now, just Log hitting a selectable
-          UE_LOG(LogTemp, Warning, TEXT("Selected Actor: %s"),
-                 *HitActor->GetName());
+    if (HitActor)
+    {
+      if (TheHouse_IsModalRtsUiBlockingWorldSelection())
+      {
+        return;
+      }
 
-          Selectable->OnSelect();
+      RTS_SelectExclusive(HitActor);
+      if (ATheHouseObject* PlacedObj = Cast<ATheHouseObject>(HitActor))
+      {
+        OpenPlacedObjectSettingsWidgetFor(PlacedObj);
+        if (PlacedObj->bOpenParametersPanelOnLeftClick && PlacedObjectSettingsWidgetClass)
+        {
+          if (UWorld* World = GetWorld())
+          {
+            LastRtsParamPanelObjectReleaseTimeSeconds = World->GetTimeSeconds();
+            LastRtsParamPanelObjectRelease = PlacedObj;
+          }
+        }
+        if (bOpenContextMenuWhenLeftClickObject)
+        {
+          TryOpenRTSContextMenuForObject(PlacedObj);
         }
       }
+      else
+      {
+        ClosePlacedObjectSettingsWidget();
+      }
+    }
+    else
+    {
+      RTS_DeselectAll();
     }
   } else // Box Selection
   {
@@ -1194,17 +1830,68 @@ void ATheHousePlayerController::Input_SelectReleased() {
           SelectionStartPos, CurrentMousePos, SelectedActors, false, false);
     }
 
-    for (AActor *Actor : SelectedActors) {
-      // Check Interface AND IsSelectable condition
-      if (Actor && Actor->Implements<UTheHouseSelectable>()) {
-        ITheHouseSelectable *Selectable = Cast<ITheHouseSelectable>(Actor);
-        if (Selectable && Selectable->IsSelectable()) {
-          UE_LOG(LogTemp, Warning, TEXT("Box Selected: %s"), *Actor->GetName());
-          Selectable->OnSelect();
-        }
-      }
-    }
+	AppendSelectableNPCsIntersectingRTSBox(SelectionStartPos, CurrentMousePos, SelectedActors);
+
+	RTS_SelectFromBox(SelectedActors);
   }
+}
+
+void ATheHousePlayerController::Input_SelectDoubleClick()
+{
+	// Même garde-fous que la sélection classique.
+	if (AnyRTSContextMenuOpen() || bIsRotateModifierDown)
+	{
+		return;
+	}
+	if (PlacementState == EPlacementState::Previewing)
+	{
+		if (StaffPlacementPreviewNpc)
+		{
+			ConfirmStaffNpcPlacement();
+		}
+		else if (PreviewActor)
+		{
+			ConfirmPlacement();
+		}
+		return;
+	}
+	if (!IsValid(RTSPawnReference) || GetPawn() != RTSPawnReference)
+	{
+		return;
+	}
+	if (TheHouse_IsModalRtsUiBlockingWorldSelection())
+	{
+		return;
+	}
+
+	FHitResult Hit;
+	if (!GetHitResultUnderCursor(ECC_Visibility, false, Hit))
+	{
+		return;
+	}
+	ATheHouseObject* Obj = Cast<ATheHouseObject>(Hit.GetActor());
+	if (!IsValid(Obj) || Obj->IsPlacementPreviewActor())
+	{
+		return;
+	}
+	if (!Obj->bOpenParametersPanelOnLeftClick || !PlacedObjectSettingsWidgetClass)
+	{
+		return;
+	}
+	if (!Obj->Implements<UTheHouseSelectable>())
+	{
+		return;
+	}
+	if (ITheHouseSelectable* Sel = Cast<ITheHouseSelectable>(Obj))
+	{
+		if (!Sel->IsSelectable())
+		{
+			return;
+		}
+	}
+
+	RTS_SelectExclusive(Obj);
+	OpenPlacedObjectSettingsWidgetFor(Obj);
 }
 
 
@@ -1214,9 +1901,37 @@ void ATheHousePlayerController::PlayerTick(float DeltaTime)
 {
     Super::PlayerTick(DeltaTime);
 
+	if (GetWorld() && GetPawn() == RTSPawnReference && RTSSelectedActors.Num() > 0)
+	{
+		const FColor SelectionRim(255, 252, 245);
+		for (const TWeakObjectPtr<AActor>& W : RTSSelectedActors)
+		{
+			if (AActor* A = W.Get())
+			{
+				// Pas de DrawDebugBox pour les personnages : ce serait toujours une AABB (boîte filaire) ;
+				// la sélection visible repose sur Custom Depth sur le mesh (voir OnSelect sur NPC / objets).
+				if (Cast<ACharacter>(A))
+				{
+					continue;
+				}
+				FVector Origin, Extent;
+				ATheHouseObject::GetActorOutlineDebugBounds(A, Origin, Extent);
+				if (Extent.GetMax() > KINDA_SMALL_NUMBER)
+				{
+					DrawDebugBox(GetWorld(), Origin, Extent, FQuat::Identity, SelectionRim, false, 0.f, 0, 2.5f);
+				}
+			}
+		}
+	}
+
     const bool bIsInRTSPlacementContext = (GetPawn() == RTSPawnReference);
 
     // Placement rotation : géré dans TheHouse_ApplyWheelZoom (molette interceptée par le viewport).
+
+    if (bIsInRTSPlacementContext && PlacementState == EPlacementState::Previewing && StaffPlacementPreviewNpc)
+    {
+      UpdateStaffNpcPlacementPreview();
+    }
 
     if (bIsInRTSPlacementContext && PlacementState == EPlacementState::Previewing && PreviewActor)
     {
@@ -1225,7 +1940,19 @@ void ATheHousePlayerController::PlayerTick(float DeltaTime)
 
     // Fallback confirm: independent of ActionMappings/EnhancedInput quirks.
     // If we're previewing and the user left-clicks (without rotate modifier), confirm placement.
-    if (bIsInRTSPlacementContext && PlacementState == EPlacementState::Previewing && PreviewActor && !bIsRotateModifierDown)
+    // Même si Select ne confirme pas la pose quand le menu est ouvert, ce fallback
+    // PlayerTick ignorait RTSContextMenuInstance → le clic « mangeait » l’UI du menu.
+    if (!AnyRTSContextMenuOpen() && bIsInRTSPlacementContext && PlacementState == EPlacementState::Previewing &&
+        StaffPlacementPreviewNpc && !bIsRotateModifierDown)
+    {
+      if (WasInputKeyJustPressed(EKeys::LeftMouseButton))
+      {
+        ConfirmStaffNpcPlacement();
+      }
+    }
+
+    if (!AnyRTSContextMenuOpen() && bIsInRTSPlacementContext && PlacementState == EPlacementState::Previewing && PreviewActor &&
+        !bIsRotateModifierDown)
     {
       if (WasInputKeyJustPressed(EKeys::LeftMouseButton))
       {
@@ -1385,6 +2112,7 @@ void ATheHousePlayerController::UpdatePlacementPreview()
 	{
 		if (!Hit.bBlockingHit)
 		{
+			PreviewActor->ClearPlacementBlockerActorCaches();
 			PreviewActor->SetPlacementState(EObjectPlacementState::OverlapsWorld);
 			if (TheHousePlacementDebug::IsEnabled())
 			{
@@ -1396,6 +2124,7 @@ void ATheHousePlayerController::UpdatePlacementPreview()
 		// Reject walls/steep surfaces: placement grid is meant for floors.
 		if (!ValidatePlacement(Hit))
 		{
+			PreviewActor->ClearPlacementBlockerActorCaches();
 			PreviewActor->SetPlacementState(EObjectPlacementState::OverlapsWorld);
 			if (TheHousePlacementDebug::IsEnabled())
 			{
@@ -1454,6 +2183,7 @@ void ATheHousePlayerController::UpdatePlacementPreview()
 	else if (PreviewActor)
 	{
 		// No hit under cursor => invalid placement.
+		PreviewActor->ClearPlacementBlockerActorCaches();
 		PreviewActor->SetPlacementState(EObjectPlacementState::OverlapsWorld);
 		if (TheHousePlacementDebug::IsEnabled())
 		{
@@ -1462,10 +2192,378 @@ void ATheHousePlayerController::UpdatePlacementPreview()
 	}
 }
 
+void ATheHousePlayerController::UpdateStaffNpcPlacementPreview()
+{
+	if (!StaffPlacementPreviewNpc)
+	{
+		return;
+	}
+
+	FVector WorldOrigin, WorldDir;
+	if (!DeprojectMousePositionToWorld(WorldOrigin, WorldDir))
+	{
+		bStaffNpcPlacementLocationValid = false;
+		return;
+	}
+
+	FHitResult Hit;
+	const FVector End = WorldOrigin + WorldDir * 100000.f;
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(StaffNpcPlacementPreviewTrace), true);
+	Params.AddIgnoredActor(this);
+	if (RTSPawnReference)
+	{
+		Params.AddIgnoredActor(RTSPawnReference);
+	}
+	Params.AddIgnoredActor(StaffPlacementPreviewNpc);
+
+	if (!GetWorld()->LineTraceSingleByChannel(Hit, WorldOrigin, End, ECC_Visibility, Params))
+	{
+		bStaffNpcPlacementLocationValid = false;
+		return;
+	}
+
+	if (!ValidatePlacement(Hit))
+	{
+		bStaffNpcPlacementLocationValid = false;
+		return;
+	}
+
+	FVector Loc = Hit.ImpactPoint;
+	if (PlacementGrid.bEnableGridSnap && PlacementGrid.CellSize > KINDA_SMALL_NUMBER)
+	{
+		const FVector SnappedXY = SnapWorldToGridXY(Loc);
+		Loc.X = SnappedXY.X;
+		Loc.Y = SnappedXY.Y;
+	}
+
+	float HalfH = 96.f;
+	if (UCapsuleComponent* Cap = StaffPlacementPreviewNpc->GetCapsuleComponent())
+	{
+		HalfH = Cap->GetScaledCapsuleHalfHeight();
+	}
+	Loc.Z = Hit.ImpactPoint.Z + HalfH;
+
+	const FRotator Rot(0.f, PlacementPreviewYawDegrees, 0.f);
+	StaffPlacementPreviewNpc->SetActorLocationAndRotation(Loc, Rot);
+	bStaffNpcPlacementLocationValid = true;
+}
+
 bool ATheHousePlayerController::ValidatePlacement(const FHitResult& Hit) const
 {
 	const float Threshold = FMath::Clamp(PlacementGrid.MinUpNormalZ, 0.f, 1.f);
 	return Hit.ImpactNormal.Z >= Threshold;
+}
+
+bool ATheHousePlayerController::HasRTSSelectionActorOtherThan(const AActor* Exclude) const
+{
+	for (const TWeakObjectPtr<AActor>& W : RTSSelectedActors)
+	{
+		if (AActor* A = W.Get())
+		{
+			if (Exclude && A == Exclude)
+			{
+				continue;
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
+namespace TheHouseStaffPlacementInternal
+{
+	static void ApplyStaffOfferRuntimeStatsIfRoster(ATheHouseNPCCharacter* Npc, const FTheHouseNPCStaffRosterOffer& Offer)
+	{
+		if (!Npc || !Offer.StaffArchetype)
+		{
+			return;
+		}
+		Npc->ApplyInitialHireFromRosterOffer(Offer);
+	}
+}
+
+void ATheHousePlayerController::ConfigureStaffNpcDeferredFromOffer(ATheHouseNPCCharacter* Npc, const FTheHouseNPCStaffRosterOffer& Offer) const
+{
+	if (!Npc || !Offer.CharacterClass)
+	{
+		return;
+	}
+
+	if (Offer.StaffArchetype)
+	{
+		Npc->NPCArchetype = Offer.StaffArchetype;
+	}
+	else if (const ATheHouseNPCCharacter* CDO = Cast<ATheHouseNPCCharacter>(Offer.CharacterClass.GetDefaultObject()))
+	{
+		Npc->NPCArchetype = CDO->NPCArchetype;
+	}
+
+	if (Offer.MeshVariantRollIndex >= 0)
+	{
+		Npc->StaffMeshVariantRollIndex = Offer.MeshVariantRollIndex;
+	}
+	else
+	{
+		Npc->StaffMeshVariantRollIndex = INDEX_NONE;
+	}
+}
+
+void ATheHousePlayerController::RefreshNPCStaffRecruitmentOffers()
+{
+	NPCStaffRosterOffers.Reset();
+	if (NPCStaffRecruitmentPool.Num() == 0)
+	{
+		RefreshRTSMainWidget();
+		return;
+	}
+
+	int32 NextIndex = 0;
+	for (const FTheHouseNPCStaffPoolSlotDef& Slot : NPCStaffRecruitmentPool)
+	{
+		if (!Slot.CharacterClass || !Slot.StaffArchetype)
+		{
+			continue;
+		}
+
+		const int32 Offers = FMath::Max(1, Slot.OffersPerRefresh);
+		const float MulMin = FMath::Min(Slot.SalaryMultiplierMin, Slot.SalaryMultiplierMax);
+		const float MulMax = FMath::Max(Slot.SalaryMultiplierMin, Slot.SalaryMultiplierMax);
+		const int32 StarLo = FMath::Clamp(FMath::Min(Slot.StarRatingMin, Slot.StarRatingMax), 1, 5);
+		const int32 StarHi = FMath::Clamp(FMath::Max(Slot.StarRatingMin, Slot.StarRatingMax), 1, 5);
+
+		const float BaseSalary = FMath::Max(0.f, Slot.StaffArchetype->DefaultMonthlySalary);
+
+		for (int32 n = 0; n < Offers; ++n)
+		{
+			FTheHouseNPCStaffRosterOffer Offer;
+			Offer.OfferIndexInRoster = NextIndex++;
+			Offer.CharacterClass = Slot.CharacterClass;
+			Offer.StaffArchetype = Slot.StaffArchetype;
+
+			const float Mul = FMath::FRandRange(MulMin, MulMax);
+			Offer.MonthlySalary = FMath::Max(0.f, BaseSalary * Mul);
+			Offer.StarRating = FMath::RandRange(StarLo, StarHi);
+
+			if (Slot.RandomDisplayNames.Num() > 0)
+			{
+				const int32 Ni = FMath::RandRange(0, Slot.RandomDisplayNames.Num() - 1);
+				Offer.DisplayName = Slot.RandomDisplayNames[Ni];
+			}
+			else
+			{
+				Offer.DisplayName = FText::Format(
+					NSLOCTEXT("TheHouse", "StaffRosterGenericName", "{0} #{1}"),
+					FText::FromString(Slot.StaffArchetype->GetName()),
+					FText::AsNumber(Offer.OfferIndexInRoster));
+			}
+
+			const float Months = FMath::Max(0.f, Slot.HireCostSalaryMonths);
+			Offer.HireCost = Months <= 0.f ? 0 : FMath::CeilToInt(Offer.MonthlySalary * Months);
+
+			const int32 NumVar = Slot.StaffArchetype->SkeletalMeshVariants.Num();
+			if (NumVar > 0)
+			{
+				Offer.MeshVariantRollIndex = FMath::RandRange(0, NumVar - 1);
+			}
+			else
+			{
+				Offer.MeshVariantRollIndex = INDEX_NONE;
+			}
+
+			NPCStaffRosterOffers.Add(Offer);
+		}
+	}
+
+	RefreshRTSMainWidget();
+}
+
+void ATheHousePlayerController::StartStaffNpcPlacementFromRosterOffer(int32 RosterOfferIndex)
+{
+	if (!NPCStaffRosterOffers.IsValidIndex(RosterOfferIndex) || !RTSPawnReference || GetPawn() != RTSPawnReference)
+	{
+		return;
+	}
+
+	const FTheHouseNPCStaffRosterOffer Pick = NPCStaffRosterOffers[RosterOfferIndex];
+	if (Pick.HireCost > 0 && Money < Pick.HireCost)
+	{
+		return;
+	}
+
+	CancelPlacement();
+
+	PendingStaffSpawnOffer = Pick;
+
+	RTS_DeselectAll();
+
+	UWorld* World = GetWorld();
+	if (!World || !Pick.CharacterClass)
+	{
+		PendingStaffSpawnOffer = FTheHouseNPCStaffRosterOffer();
+		return;
+	}
+
+	AActor* Deferred = UGameplayStatics::BeginDeferredActorSpawnFromClass(
+		World,
+		Pick.CharacterClass,
+		FTransform::Identity,
+		ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn,
+		this);
+
+	ATheHouseNPCCharacter* Npc = Cast<ATheHouseNPCCharacter>(Deferred);
+	if (!Npc)
+	{
+		PendingStaffSpawnOffer = FTheHouseNPCStaffRosterOffer();
+		return;
+	}
+
+	Npc->AutoPossessAI = EAutoPossessAI::Disabled;
+	Npc->AIControllerClass = nullptr;
+
+	ConfigureStaffNpcDeferredFromOffer(Npc, PendingStaffSpawnOffer);
+
+	UGameplayStatics::FinishSpawningActor(Npc, FTransform::Identity);
+
+	StaffPlacementPreviewNpc = Npc;
+	StaffPlacementPreviewNpc->SetActorEnableCollision(false);
+	if (UCapsuleComponent* Cap = StaffPlacementPreviewNpc->GetCapsuleComponent())
+	{
+		Cap->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	}
+
+	TheHouseStaffPlacementInternal::ApplyStaffOfferRuntimeStatsIfRoster(StaffPlacementPreviewNpc, PendingStaffSpawnOffer);
+
+	PlacementState = EPlacementState::Previewing;
+	PlacementPreviewYawDegrees = 0.f;
+	bStaffNpcPlacementLocationValid = false;
+
+	UpdateStaffNpcPlacementPreview();
+}
+
+void ATheHousePlayerController::StartStaffNpcPlacementFromPalette(TSubclassOf<ATheHouseNPCCharacter> NPCClass, int32 HireCost)
+{
+	if (!NPCClass || !RTSPawnReference || GetPawn() != RTSPawnReference)
+	{
+		return;
+	}
+
+	FTheHouseNPCStaffRosterOffer Offer;
+	Offer.CharacterClass = NPCClass;
+	Offer.HireCost = FMath::Max(0, HireCost);
+	Offer.OfferIndexInRoster = INDEX_NONE;
+
+	if (Offer.HireCost > 0 && Money < Offer.HireCost)
+	{
+		return;
+	}
+
+	CancelPlacement();
+
+	PendingStaffSpawnOffer = Offer;
+
+	RTS_DeselectAll();
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	AActor* Deferred = UGameplayStatics::BeginDeferredActorSpawnFromClass(
+		World,
+		PendingStaffSpawnOffer.CharacterClass,
+		FTransform::Identity,
+		ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn,
+		this);
+
+	ATheHouseNPCCharacter* Npc = Cast<ATheHouseNPCCharacter>(Deferred);
+	if (!Npc)
+	{
+		PendingStaffSpawnOffer = FTheHouseNPCStaffRosterOffer();
+		return;
+	}
+
+	Npc->AutoPossessAI = EAutoPossessAI::Disabled;
+	Npc->AIControllerClass = nullptr;
+
+	ConfigureStaffNpcDeferredFromOffer(Npc, PendingStaffSpawnOffer);
+
+	UGameplayStatics::FinishSpawningActor(Npc, FTransform::Identity);
+
+	StaffPlacementPreviewNpc = Npc;
+	StaffPlacementPreviewNpc->SetActorEnableCollision(false);
+	if (UCapsuleComponent* Cap = StaffPlacementPreviewNpc->GetCapsuleComponent())
+	{
+		Cap->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	}
+
+	TheHouseStaffPlacementInternal::ApplyStaffOfferRuntimeStatsIfRoster(StaffPlacementPreviewNpc, PendingStaffSpawnOffer);
+
+	PlacementState = EPlacementState::Previewing;
+	PlacementPreviewYawDegrees = 0.f;
+	bStaffNpcPlacementLocationValid = false;
+
+	UpdateStaffNpcPlacementPreview();
+}
+
+void ATheHousePlayerController::ConfirmStaffNpcPlacement()
+{
+	if (!RTSPawnReference || GetPawn() != RTSPawnReference)
+	{
+		return;
+	}
+	if (PlacementState != EPlacementState::Previewing || !StaffPlacementPreviewNpc || !bStaffNpcPlacementLocationValid)
+	{
+		return;
+	}
+
+	const FTheHouseNPCStaffRosterOffer OfferCopy = PendingStaffSpawnOffer;
+	if (OfferCopy.HireCost > Money)
+	{
+		return;
+	}
+
+	const FTransform SpawnXform = StaffPlacementPreviewNpc->GetActorTransform();
+
+	CancelPlacement();
+
+	if (!OfferCopy.CharacterClass)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	AActor* DeferredLive = UGameplayStatics::BeginDeferredActorSpawnFromClass(
+		World,
+		OfferCopy.CharacterClass,
+		SpawnXform,
+		ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn,
+		this);
+
+	ATheHouseNPCCharacter* Live = Cast<ATheHouseNPCCharacter>(DeferredLive);
+	if (!Live)
+	{
+		return;
+	}
+
+	ConfigureStaffNpcDeferredFromOffer(Live, OfferCopy);
+
+	UGameplayStatics::FinishSpawningActor(Live, SpawnXform);
+
+	TheHouseStaffPlacementInternal::ApplyStaffOfferRuntimeStatsIfRoster(Live, OfferCopy);
+
+	if (OfferCopy.HireCost > 0)
+	{
+		Money = FMath::Max(0, Money - OfferCopy.HireCost);
+	}
+
+	RefreshRTSMainWidget();
 }
 
 void ATheHousePlayerController::ConfirmPlacement()
@@ -1497,6 +2595,23 @@ void ATheHousePlayerController::ConfirmPlacement()
 		return;
 	}
 
+	const bool bChargeCatalogPurchase =
+		!bRelocationPreviewActive && PendingStockConsumeIndex == INDEX_NONE;
+	int32 CatalogPurchasePrice = 0;
+	if (bChargeCatalogPurchase)
+	{
+		CatalogPurchasePrice = GetPurchasePriceForClass(PreviewActor->GetClass());
+		if (Money < CatalogPurchasePrice)
+		{
+			if (TheHousePlacementDebug::IsEnabled())
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[Placement] Confirm blocked: argent insuffisant (besoin %d, a %d)"),
+					CatalogPurchasePrice, Money);
+			}
+			return;
+		}
+	}
+
 	// Mark grid cells as occupied (so next placements are blocked).
 	TArray<FIntPoint> Cells;
 	GetFootprintCellsForTransform(PreviewActor, PreviewActor->GetActorTransform(), Cells);
@@ -1508,14 +2623,26 @@ void ATheHousePlayerController::ConfirmPlacement()
 		UE_LOG(LogTemp, Warning, TEXT("[Placement] Finalized placement. Cells marked=%d"), Cells.Num());
 	}
 
-	if (PendingStockConsumeIndex != INDEX_NONE && StoredPlaceables.IsValidIndex(PendingStockConsumeIndex))
+	if (bChargeCatalogPurchase && CatalogPurchasePrice > 0)
 	{
-		if (PreviewActor && PreviewActor->GetClass() == StoredPlaceables[PendingStockConsumeIndex])
+		Money = FMath::Max(0, Money - CatalogPurchasePrice);
+	}
+
+	if (PendingStockConsumeIndex != INDEX_NONE && StoredPlaceableStacks.IsValidIndex(PendingStockConsumeIndex))
+	{
+		FTheHouseStoredStack& Stack = StoredPlaceableStacks[PendingStockConsumeIndex];
+		if (PreviewActor && PreviewActor->GetClass() == Stack.ObjectClass)
 		{
-			StoredPlaceables.RemoveAt(PendingStockConsumeIndex);
+			Stack.Count = FMath::Max(0, Stack.Count - 1);
+			if (Stack.Count <= 0)
+			{
+				StoredPlaceableStacks.RemoveAt(PendingStockConsumeIndex);
+			}
 		}
 	}
 	PendingStockConsumeIndex = INDEX_NONE;
+
+	bRelocationPreviewActive = false;
 
 	PreviewActor = nullptr;
 	PlacementState = EPlacementState::None;
@@ -1610,27 +2737,64 @@ void ATheHousePlayerController::MarkCellsFree(const TArray<FIntPoint>& Cells)
 	}
 }
 
+void ATheHousePlayerController::EnsureDefaultNPCRTSContextMenuDefs()
+{
+	NPCRTSContextMenuOptionDefs.RemoveAll([](const FTheHouseRTSContextMenuOptionDef& D)
+	{
+		return D.OptionId.IsNone();
+	});
+
+	if (NPCRTSContextMenuOptionDefs.Num() == 0)
+	{
+		using namespace TheHouseNPCContextIds;
+
+		FTheHouseRTSContextMenuOptionDef DInsp;
+		DInsp.OptionId = InspectNPC;
+		DInsp.Label = NSLOCTEXT("TheHouse", "RTS_NPCMenu_Inspect", "Inspecter");
+		NPCRTSContextMenuOptionDefs.Add(DInsp);
+
+		FTheHouseRTSContextMenuOptionDef DUse;
+		DUse.OptionId = UsePlacedObjectAtCursor;
+		DUse.Label = NSLOCTEXT("TheHouse", "RTS_NPCMenu_UseObject", "Utiliser l’objet (curseur)");
+		NPCRTSContextMenuOptionDefs.Add(DUse);
+	}
+}
+
 void ATheHousePlayerController::EnsureDefaultRTSContextMenuDefs()
 {
 	RTSContextMenuOptionDefs.RemoveAll([](const FTheHouseRTSContextMenuOptionDef& D) {
 		return D.OptionId.IsNone();
 	});
 
-	if (RTSContextMenuOptionDefs.Num() > 0)
+	if (RTSContextMenuOptionDefs.Num() == 0)
 	{
-		return;
+		FTheHouseRTSContextMenuOptionDef DDel;
+		DDel.OptionId = TheHouseRTSContextIds::DeleteObject;
+		DDel.Label = NSLOCTEXT("TheHouse", "RTS_RemoveObject", "Vendre");
+		RTSContextMenuOptionDefs.Add(DDel);
+
+		FTheHouseRTSContextMenuOptionDef DSt;
+		DSt.OptionId = TheHouseRTSContextIds::StoreObject;
+		DSt.Label = NSLOCTEXT("TheHouse", "RTS_StoreObject", "Mettre en stock");
+		RTSContextMenuOptionDefs.Add(DSt);
 	}
 
+	auto HasOptionId = [this](FName Id) -> bool {
+		for (const FTheHouseRTSContextMenuOptionDef& D : RTSContextMenuOptionDefs)
+		{
+			if (D.OptionId == Id)
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+	using namespace TheHouseRTSContextIds;
+	if (!HasOptionId(RelocateObject))
 	{
 		FTheHouseRTSContextMenuOptionDef D;
-		D.OptionId = TheHouseRTSContextIds::DeleteObject;
-		D.Label = NSLOCTEXT("TheHouse", "RTS_RemoveObject", "Vendre");
-		RTSContextMenuOptionDefs.Add(D);
-	}
-	{
-		FTheHouseRTSContextMenuOptionDef D;
-		D.OptionId = TheHouseRTSContextIds::StoreObject;
-		D.Label = NSLOCTEXT("TheHouse", "RTS_StoreObject", "Mettre en stock");
+		D.OptionId = RelocateObject;
+		D.Label = NSLOCTEXT("TheHouse", "RTS_RelocateObject", "Déplacer");
 		RTSContextMenuOptionDefs.Add(D);
 	}
 }
@@ -1643,7 +2807,16 @@ void ATheHousePlayerController::InitializeModeWidgets()
 	}
 	if (!RTSContextMenuWidgetClass)
 	{
+		// Slate C++ pur (RebuildWidget) : affichage fiable sans Widget Blueprint / OptionsBox.
 		RTSContextMenuWidgetClass = UTheHouseRTSContextMenuWidget::StaticClass();
+	}
+	if (!NPCRTSContextMenuWidgetClass)
+	{
+		NPCRTSContextMenuWidgetClass = UTheHouseNPCRTSContextMenuUMGWidget::StaticClass();
+	}
+	if (!NPCOrderContextMenuWidgetClass)
+	{
+		NPCOrderContextMenuWidgetClass = UTheHouseNPCOrderContextMenuUMGWidget::StaticClass();
 	}
 	if (!FPSHudWidgetClass)
 	{
@@ -1695,6 +2868,41 @@ void ATheHousePlayerController::CloseRTSContextMenu()
 		RTSContextMenuInstance->RemoveFromParent();
 		RTSContextMenuInstance = nullptr;
 	}
+
+	if (RTSNPCContextMenuInstance)
+	{
+		RTSNPCContextMenuInstance->RemoveFromParent();
+		RTSNPCContextMenuInstance = nullptr;
+	}
+
+	if (RTSNPCOrderOnObjectMenuInstance)
+	{
+		RTSNPCOrderOnObjectMenuInstance->RemoveFromParent();
+		RTSNPCOrderOnObjectMenuInstance = nullptr;
+	}
+
+	if (RTSNPCOrderOnNPCMenuInstance)
+	{
+		RTSNPCOrderOnNPCMenuInstance->RemoveFromParent();
+		RTSNPCOrderOnNPCMenuInstance = nullptr;
+	}
+
+	if (RTSNPCOrderOnGroundMenuInstance)
+	{
+		RTSNPCOrderOnGroundMenuInstance->RemoveFromParent();
+		RTSNPCOrderOnGroundMenuInstance = nullptr;
+	}
+
+	// Restore RTS input mode so clicks go back to the game when menu closes.
+	if (Cast<ATheHouseCameraPawn>(GetPawn()) == RTSPawnReference && !bIsRotateModifierDown)
+	{
+		bShowMouseCursor = true;
+		FInputModeGameAndUI InputMode;
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		InputMode.SetHideCursorDuringCapture(false);
+		SetInputMode(InputMode);
+		TheHouse_FocusKeyboardOnGameViewport();
+	}
 }
 
 bool ATheHousePlayerController::IsRtsCameraRotateModifierPhysicallyDown() const
@@ -1703,30 +2911,46 @@ bool ATheHousePlayerController::IsRtsCameraRotateModifierPhysicallyDown() const
 		   TheHouseInputPoll::IsKeyPhysicallyDown(this, EKeys::RightAlt);
 }
 
-ATheHouseObject* ATheHousePlayerController::FindPlacedTheHouseObjectUnderCursor() const
+void ATheHousePlayerController::CollectMergedRTSLineHitsUnderCursor(TMap<AActor*, FHitResult>& OutBestHitPerActor) const
 {
-	FHitResult Hit;
-	if (GetHitResultUnderCursor(ECC_Visibility, false, Hit))
+	OutBestHitPerActor.Reset();
+
+	auto ConsiderHit = [&OutBestHitPerActor](const FHitResult& H)
 	{
-		if (ATheHouseObject* Obj = Cast<ATheHouseObject>(Hit.GetActor()))
+		AActor* A = H.GetActor();
+		if (!IsValid(A))
 		{
-			if (Obj != PreviewActor && !Obj->IsPlacementPreviewActor())
+			return;
+		}
+		if (FHitResult* Existing = OutBestHitPerActor.Find(A))
+		{
+			if (H.Distance < Existing->Distance)
 			{
-				return Obj;
+				*Existing = H;
 			}
 		}
+		else
+		{
+			OutBestHitPerActor.Add(A, H);
+		}
+	};
+
+	FHitResult CursorHit;
+	if (GetHitResultUnderCursor(ECC_Visibility, false, CursorHit))
+	{
+		ConsiderHit(CursorHit);
 	}
 
 	FVector WorldOrigin, WorldDir;
 	if (!DeprojectMousePositionToWorld(WorldOrigin, WorldDir))
 	{
-		return nullptr;
+		return;
 	}
 
 	UWorld* World = GetWorld();
 	if (!World)
 	{
-		return nullptr;
+		return;
 	}
 
 	const FVector End = WorldOrigin + WorldDir * 200000.f;
@@ -1740,153 +2964,1281 @@ ATheHouseObject* ATheHousePlayerController::FindPlacedTheHouseObjectUnderCursor(
 		Params.AddIgnoredActor(PreviewActor);
 	}
 
-	auto PickClosestTheHouseObject = [this](const TArray<FHitResult>& Hits) -> ATheHouseObject*
+	TArray<FHitResult> Hits;
+	auto RunChannelTrace = [&](ECollisionChannel Channel)
 	{
-		ATheHouseObject* Best = nullptr;
-		float BestDist = TNumericLimits<float>::Max();
-		for (const FHitResult& H : Hits)
+		Hits.Reset();
+		if (World->LineTraceMultiByChannel(Hits, WorldOrigin, End, Channel, Params))
 		{
-			ATheHouseObject* Obj = Cast<ATheHouseObject>(H.GetActor());
-			if (!IsValid(Obj) || Obj == PreviewActor || Obj->IsPlacementPreviewActor())
+			for (const FHitResult& H : Hits)
 			{
-				continue;
-			}
-			const float D = H.Distance;
-			if (D < BestDist)
-			{
-				BestDist = D;
-				Best = Obj;
+				ConsiderHit(H);
 			}
 		}
-		return Best;
 	};
 
-	TArray<FHitResult> Hits;
-	if (World->LineTraceMultiByChannel(Hits, WorldOrigin, End, ECC_Visibility, Params))
-	{
-		if (ATheHouseObject* Picked = PickClosestTheHouseObject(Hits))
-		{
-			return Picked;
-		}
-	}
+	RunChannelTrace(ECC_Visibility);
+	RunChannelTrace(ECC_WorldDynamic);
+	RunChannelTrace(ECC_WorldStatic);
 
-	Hits.Reset();
-	if (World->LineTraceMultiByChannel(Hits, WorldOrigin, End, ECC_WorldDynamic, Params))
-	{
-		if (ATheHouseObject* Picked = PickClosestTheHouseObject(Hits))
-		{
-			return Picked;
-		}
-	}
-
-	Hits.Reset();
-	if (World->LineTraceMultiByChannel(Hits, WorldOrigin, End, ECC_WorldStatic, Params))
-	{
-		if (ATheHouseObject* Picked = PickClosestTheHouseObject(Hits))
-		{
-			return Picked;
-		}
-	}
-
-	// Meshes / BP qui n’ignorent pas les canaux ci-dessus mais ne bloquent pas Visibility.
 	Hits.Reset();
 	FCollisionObjectQueryParams ObjParams;
 	ObjParams.AddObjectTypesToQuery(ECC_WorldStatic);
 	ObjParams.AddObjectTypesToQuery(ECC_WorldDynamic);
 	if (World->LineTraceMultiByObjectType(Hits, WorldOrigin, End, ObjParams, Params))
 	{
-		if (ATheHouseObject* Picked = PickClosestTheHouseObject(Hits))
+		for (const FHitResult& H : Hits)
 		{
-			return Picked;
+			ConsiderHit(H);
+		}
+	}
+}
+
+bool ATheHousePlayerController::TryResolveGroundClickLocation(const TMap<AActor*, FHitResult>& MergedHits, FVector& OutLocation) const
+{
+	float BestDist = TNumericLimits<float>::Max();
+	bool bFound = false;
+
+	for (const TPair<AActor*, FHitResult>& P : MergedHits)
+	{
+		const FHitResult& H = P.Value;
+		// Surface « au sol » : évite murs / murs invisibles ; ajustez le seuil si besoin.
+		if (H.Normal.Z >= 0.62f && H.Distance < BestDist)
+		{
+			BestDist = H.Distance;
+			OutLocation = H.Location;
+			bFound = true;
 		}
 	}
 
-	return nullptr;
+	if (bFound)
+	{
+		return true;
+	}
+
+	FVector WorldOrigin, WorldDir;
+	if (!DeprojectMousePositionToWorld(WorldOrigin, WorldDir))
+	{
+		return false;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+
+	const FVector TraceEnd = WorldOrigin + WorldDir * 200000.f;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(TheHouseRTSGroundPick), false);
+	if (RTSPawnReference)
+	{
+		Params.AddIgnoredActor(RTSPawnReference);
+	}
+	if (PreviewActor)
+	{
+		Params.AddIgnoredActor(PreviewActor);
+	}
+
+	FHitResult Hit;
+	if (World->LineTraceSingleByChannel(Hit, WorldOrigin, TraceEnd, ECC_WorldStatic, Params))
+	{
+		OutLocation = Hit.Location;
+		return true;
+	}
+
+	return false;
 }
 
-void ATheHousePlayerController::TryOpenRTSContextMenuAtCursor()
+AActor* ATheHousePlayerController::FindPrimarySelectableActorUnderCursorRTS() const
 {
-	if (!RTSPawnReference || GetPawn() != RTSPawnReference)
+	TMap<AActor*, FHitResult> Merged;
+	CollectMergedRTSLineHitsUnderCursor(Merged);
+
+	AActor* BestActor = nullptr;
+	float BestDist = TNumericLimits<float>::Max();
+
+	for (const TPair<AActor*, FHitResult>& P : Merged)
 	{
-		return;
+		AActor* Act = P.Key;
+		if (!IsValid(Act) || !Act->Implements<UTheHouseSelectable>())
+		{
+			continue;
+		}
+
+		ITheHouseSelectable* Sel = Cast<ITheHouseSelectable>(Act);
+		if (!Sel || !Sel->IsSelectable())
+		{
+			continue;
+		}
+
+		if (ATheHouseObject* Obj = Cast<ATheHouseObject>(Act))
+		{
+			if (!IsValid(Obj) || Obj == PreviewActor || Obj->IsPlacementPreviewActor())
+			{
+				continue;
+			}
+		}
+
+		const float D = P.Value.Distance;
+		const bool bCloser = D < BestDist;
+		const bool bTiePreferNpc =
+			FMath::IsNearlyEqual(D, BestDist, KINDA_SMALL_NUMBER) && Cast<ATheHouseNPCCharacter>(Act) &&
+			!Cast<ATheHouseNPCCharacter>(BestActor);
+
+		if (bCloser || bTiePreferNpc)
+		{
+			BestDist = D;
+			BestActor = Act;
+		}
 	}
-	if (IsRtsCameraRotateModifierPhysicallyDown())
+
+	return BestActor;
+}
+
+void ATheHousePlayerController::AppendSelectableNPCsIntersectingRTSBox(
+	const FVector2D& RectCornerA,
+	const FVector2D& RectCornerB,
+	TArray<AActor*>& InOutActors) const
+{
+	UWorld* World = GetWorld();
+	if (!World)
 	{
 		return;
 	}
 
-	ATheHouseObject* Obj = FindPlacedTheHouseObjectUnderCursor();
+	const FVector2D RectMin(FMath::Min(RectCornerA.X, RectCornerB.X), FMath::Min(RectCornerA.Y, RectCornerB.Y));
+	const FVector2D RectMax(FMath::Max(RectCornerA.X, RectCornerB.X), FMath::Max(RectCornerA.Y, RectCornerB.Y));
+
+	for (TActorIterator<ATheHouseNPCCharacter> It(World); It; ++It)
+	{
+		ATheHouseNPCCharacter* Npc = *It;
+		if (!IsValid(Npc) || !Npc->IsSelectable())
+		{
+			continue;
+		}
+
+		const USkeletalMeshComponent* Mesh = Npc->GetMesh();
+		if (!Mesh)
+		{
+			continue;
+		}
+
+		const FBoxSphereBounds& MB = Mesh->Bounds;
+		const FVector O = MB.Origin;
+		const FVector E = MB.BoxExtent;
+
+		constexpr float Huge = TNumericLimits<float>::Max();
+		FVector2D ScreenMin(Huge, Huge);
+		FVector2D ScreenMax(-Huge, -Huge);
+		int32 ProjectedCount = 0;
+
+		for (int32 sx = -1; sx <= 1; sx += 2)
+		{
+			for (int32 sy = -1; sy <= 1; sy += 2)
+			{
+				for (int32 sz = -1; sz <= 1; sz += 2)
+				{
+					const FVector Corner(O.X + static_cast<float>(sx) * E.X, O.Y + static_cast<float>(sy) * E.Y, O.Z + static_cast<float>(sz) * E.Z);
+					FVector2D Scr;
+					if (!ProjectWorldLocationToScreen(Corner, Scr, true))
+					{
+						continue;
+					}
+					++ProjectedCount;
+					ScreenMin.X = FMath::Min(ScreenMin.X, Scr.X);
+					ScreenMin.Y = FMath::Min(ScreenMin.Y, Scr.Y);
+					ScreenMax.X = FMath::Max(ScreenMax.X, Scr.X);
+					ScreenMax.Y = FMath::Max(ScreenMax.Y, Scr.Y);
+				}
+			}
+		}
+
+		if (ProjectedCount == 0)
+		{
+			continue;
+		}
+
+		if (ScreenMax.X < RectMin.X || RectMax.X < ScreenMin.X || ScreenMax.Y < RectMin.Y || RectMax.Y < ScreenMin.Y)
+		{
+			continue;
+		}
+
+		InOutActors.AddUnique(Npc);
+	}
+}
+
+ATheHouseObject* ATheHousePlayerController::FindPlacedTheHouseObjectUnderCursor() const
+{
+	TMap<AActor*, FHitResult> Merged;
+	CollectMergedRTSLineHitsUnderCursor(Merged);
+
+	ATheHouseObject* Best = nullptr;
+	float BestDist = TNumericLimits<float>::Max();
+
+	for (const TPair<AActor*, FHitResult>& P : Merged)
+	{
+		ATheHouseObject* Obj = Cast<ATheHouseObject>(P.Key);
+		if (!IsValid(Obj) || Obj == PreviewActor || Obj->IsPlacementPreviewActor())
+		{
+			continue;
+		}
+		const float D = P.Value.Distance;
+		if (D < BestDist)
+		{
+			BestDist = D;
+			Best = Obj;
+		}
+	}
+
+	return Best;
+}
+
+FVector2D ATheHousePlayerController::TheHouse_GetContextMenuViewportPosition() const
+{
+	FVector2D MenuScreenPos(0.f, 0.f);
+	if (FSlateApplication::IsInitialized() && GetWorld())
+	{
+		MenuScreenPos = UWidgetLayoutLibrary::GetMousePositionOnViewport(GetWorld());
+	}
+	else
+	{
+		float MouseX = 0.f;
+		float MouseY = 0.f;
+		if (GetMousePosition(MouseX, MouseY))
+		{
+			MenuScreenPos = FVector2D(MouseX, MouseY);
+		}
+		else
+		{
+			int32 SizeX = 0;
+			int32 SizeY = 0;
+			GetViewportSize(SizeX, SizeY);
+			if (SizeX > 0 && SizeY > 0)
+			{
+				MenuScreenPos = FVector2D(SizeX * 0.5f, SizeY * 0.5f);
+			}
+		}
+	}
+	return MenuScreenPos;
+}
+
+void ATheHousePlayerController::TheHouse_OpenRTSContextMenuShared(ATheHouseObject* Obj, const FVector2D& MenuScreenPos)
+{
 	if (!IsValid(Obj))
 	{
 		return;
 	}
 
-	if (UWorld* W = GetWorld())
+	EnsureDefaultRTSContextMenuDefs();
+
+	if (UWorld* WorldForTime = GetWorld())
 	{
-		const double T = W->GetTimeSeconds();
-		if (LastRTSContextMenuOpenDebounceSeconds >= 0.0 &&
-			FMath::IsNearlyEqual(T, LastRTSContextMenuOpenDebounceSeconds, 1.e-4))
+		const double NowSec = WorldForTime->GetTimeSeconds();
+		if (LastRTSContextMenuTryOpenTimeSeconds >= 0.0 &&
+			(NowSec - LastRTSContextMenuTryOpenTimeSeconds) < TheHouse_RTSContextMenuTryOpenMinIntervalSeconds)
 		{
 			return;
 		}
-		LastRTSContextMenuOpenDebounceSeconds = T;
 	}
 
 	CloseRTSContextMenu();
+	RTS_SelectExclusive(Obj);
+	ClosePlacedObjectSettingsWidget();
 
-	float MouseX = 0.f;
-	float MouseY = 0.f;
-	if (!GetMousePosition(MouseX, MouseY))
+	UClass* MenuWidgetClass = RTSContextMenuWidgetClass
+		? RTSContextMenuWidgetClass.Get()
+		: UTheHouseRTSContextMenuWidget::StaticClass();
 	{
-		return;
+		UClass* UMGMenuType = UTheHouseRTSContextMenuUMGWidget::StaticClass();
+		UClass* SlateMenuType = UTheHouseRTSContextMenuWidget::StaticClass();
+		if (!MenuWidgetClass->IsChildOf(UMGMenuType) && !MenuWidgetClass->IsChildOf(SlateMenuType))
+		{
+#if !UE_BUILD_SHIPPING
+			UE_LOG(LogTemp, Error,
+				TEXT("[RTSContext] RTSContextMenuWidgetClass (%s) doit hériter de UTheHouseRTSContextMenuUMGWidget ou UTheHouseRTSContextMenuWidget. "
+					"Corrigez le Class Defaults du Player Controller. Utilisation du menu Slate C++ par défaut."),
+				*GetNameSafe(MenuWidgetClass));
+#endif
+			MenuWidgetClass = SlateMenuType;
+		}
 	}
 
-	if (!RTSContextMenuWidgetClass)
-	{
-		RTSContextMenuWidgetClass = UTheHouseRTSContextMenuWidget::StaticClass();
-	}
-
-	RTSContextMenuInstance = CreateWidget<UTheHouseRTSContextMenuWidget>(this, RTSContextMenuWidgetClass);
+	RTSContextMenuInstance = CreateWidget<UUserWidget>(this, MenuWidgetClass);
 	if (!RTSContextMenuInstance)
 	{
+		TheHouseRTSContextDebug::Screen(this, TEXT("[RTSContext] CreateWidget failed"), FColor::Red);
 		return;
 	}
 
-	RTSContextMenuInstance->AddToViewport(200);
-	RTSContextMenuInstance->OpenForTarget(this, Obj, FVector2D(MouseX, MouseY));
+	RTSContextMenuInstance->SetVisibility(ESlateVisibility::Visible);
+	RTSContextMenuInstance->SetRenderOpacity(1.f);
+	RTSContextMenuInstance->SetIsEnabled(true);
+	RTSContextMenuInstance->AddToViewport(100000);
+
+	bool bOpenedMenuContent = false;
+	if (UTheHouseRTSContextMenuUMGWidget* UMG = Cast<UTheHouseRTSContextMenuUMGWidget>(RTSContextMenuInstance))
+	{
+		UMG->OpenForTarget(this, Obj, MenuScreenPos);
+		bOpenedMenuContent = true;
+	}
+	else if (UTheHouseRTSContextMenuWidget* SlateMenu = Cast<UTheHouseRTSContextMenuWidget>(RTSContextMenuInstance))
+	{
+		SlateMenu->OpenForTarget(this, Obj, MenuScreenPos);
+		bOpenedMenuContent = true;
+	}
+
+	if (!bOpenedMenuContent && RTSContextMenuInstance)
+	{
+#if !UE_BUILD_SHIPPING
+		UE_LOG(LogTemp, Error, TEXT("[RTSContext] OpenForTarget non appelé (cast widget impossible). Classe=%s"), *GetNameSafe(RTSContextMenuInstance->GetClass()));
+#endif
+		RTSContextMenuInstance->RemoveFromParent();
+		RTSContextMenuInstance = nullptr;
+		return;
+	}
+
+	{
+		bShowMouseCursor = true;
+		FInputModeGameAndUI InputMode;
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		InputMode.SetHideCursorDuringCapture(false);
+		if (RTSContextMenuInstance)
+		{
+			InputMode.SetWidgetToFocus(RTSContextMenuInstance->TakeWidget());
+		}
+		SetInputMode(InputMode);
+
+		if (FSlateApplication::IsInitialized())
+		{
+			FSlateApplication::Get().ReleaseAllPointerCapture();
+		}
+	}
+
+	TheHouseRTSContextDebug::Screen(
+		this,
+		FString::Printf(TEXT("[RTSContext] Opened (%s) for %s at (%.0f,%.0f) | InViewport=%s"),
+			*GetNameSafe(RTSContextMenuInstance->GetClass()),
+			*Obj->GetName(),
+			MenuScreenPos.X, MenuScreenPos.Y,
+			RTSContextMenuInstance->IsInViewport() ? TEXT("yes") : TEXT("no")),
+		FColor::Green);
+
+	if (UWorld* WorldForTime = GetWorld())
+	{
+		LastRTSContextMenuTryOpenTimeSeconds = WorldForTime->GetTimeSeconds();
+	}
+}
+
+void ATheHousePlayerController::IssueMoveOrdersToSelectedNPCsAtLocation(const FVector& GoalLocation)
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	FVector TargetLocation = GoalLocation;
+	const bool bOnNav = TheHouseNPCOrdersInternal::ProjectPointToNavOrKeep(World, GoalLocation, TargetLocation);
+#if !UE_BUILD_SHIPPING
+	if (!bOnNav)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RTS|MoveTo] Point hors NavMesh (projection impossible). Ajoutez/étendez Nav Mesh Bounds Volume, touche P en jeu. Point=%s"),
+			*GoalLocation.ToString());
+	}
+#endif
+
+	for (const TWeakObjectPtr<AActor>& Weak : RTSSelectedActors)
+	{
+		ATheHouseNPCCharacter* Npc = Cast<ATheHouseNPCCharacter>(Weak.Get());
+		if (!IsValid(Npc) || !Npc->IsSelectable())
+		{
+			continue;
+		}
+
+		AAIController* AI = Cast<AAIController>(Npc->GetController());
+		if (!AI)
+		{
+#if !UE_BUILD_SHIPPING
+			UE_LOG(LogTemp, Warning,
+				TEXT("[RTS|MoveTo] Aucun AIController sur %s (vérifiez Auto Possess AI et AI Controller Class sur le Blueprint PNJ)."),
+				*Npc->GetName());
+#endif
+			continue;
+		}
+
+		if (ATheHouseNPCAIController* HouseAI = Cast<ATheHouseNPCAIController>(AI))
+		{
+			HouseAI->ClearScriptedAttackOrder();
+		}
+
+		FAIMoveRequest Req;
+		Req.SetGoalLocation(TargetLocation);
+		Req.SetAcceptanceRadius(52.f);
+		Req.SetUsePathfinding(true);
+		Req.SetAllowPartialPath(true);
+
+		const EPathFollowingRequestResult::Type MoveResult = AI->MoveTo(Req);
+#if !UE_BUILD_SHIPPING
+		if (MoveResult == EPathFollowingRequestResult::Failed)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[RTS|MoveTo] MoveTo a échoué pour %s (NavMesh, blocage, agent…). Goal=%s"),
+				*Npc->GetName(),
+				*TargetLocation.ToString());
+		}
+#endif
+	}
+}
+
+void ATheHousePlayerController::TheHouse_OpenRTSContextMenuForNPCShared(ATheHouseNPCCharacter* Npc, const FVector2D& MenuScreenPos)
+{
+	if (!IsValid(Npc))
+	{
+		return;
+	}
+
+	EnsureDefaultNPCRTSContextMenuDefs();
+
+	if (UWorld* WorldForTime = GetWorld())
+	{
+		const double NowSec = WorldForTime->GetTimeSeconds();
+		if (LastRTSContextMenuTryOpenTimeSeconds >= 0.0 &&
+			(NowSec - LastRTSContextMenuTryOpenTimeSeconds) < TheHouse_RTSContextMenuTryOpenMinIntervalSeconds)
+		{
+			return;
+		}
+	}
+
+	CloseRTSContextMenu();
+	ClosePlacedObjectSettingsWidget();
+
+	UClass* MenuWidgetClass = NPCRTSContextMenuWidgetClass ? NPCRTSContextMenuWidgetClass.Get()
+														   : UTheHouseNPCRTSContextMenuUMGWidget::StaticClass();
+
+	if (!MenuWidgetClass->IsChildOf(UTheHouseNPCRTSContextMenuUMGWidget::StaticClass()))
+	{
+#if !UE_BUILD_SHIPPING
+		UE_LOG(LogTemp, Error,
+			TEXT("[RTSNPCContext] NPCRTSContextMenuWidgetClass (%s) doit hériter de UTheHouseNPCRTSContextMenuUMGWidget — fallback classe C++."),
+			*GetNameSafe(MenuWidgetClass));
+#endif
+		MenuWidgetClass = UTheHouseNPCRTSContextMenuUMGWidget::StaticClass();
+	}
+
+	RTSNPCContextMenuInstance = CreateWidget<UUserWidget>(this, MenuWidgetClass);
+	if (!RTSNPCContextMenuInstance)
+	{
+		TheHouseRTSContextDebug::Screen(this, TEXT("[RTSNPCContext] CreateWidget failed"), FColor::Red);
+		return;
+	}
+
+	RTSNPCContextMenuInstance->SetVisibility(ESlateVisibility::Visible);
+	RTSNPCContextMenuInstance->SetRenderOpacity(1.f);
+	RTSNPCContextMenuInstance->SetIsEnabled(true);
+	RTSNPCContextMenuInstance->AddToViewport(100000);
+
+	bool bOpenedMenuContent = false;
+	if (UTheHouseNPCRTSContextMenuUMGWidget* UMG = Cast<UTheHouseNPCRTSContextMenuUMGWidget>(RTSNPCContextMenuInstance))
+	{
+		UMG->OpenForNPC(this, Npc, MenuScreenPos);
+		bOpenedMenuContent = true;
+	}
+
+	if (!bOpenedMenuContent && RTSNPCContextMenuInstance)
+	{
+#if !UE_BUILD_SHIPPING
+		UE_LOG(LogTemp, Error, TEXT("[RTSNPCContext] OpenForNPC impossible (cast). Classe=%s"), *GetNameSafe(RTSNPCContextMenuInstance->GetClass()));
+#endif
+		RTSNPCContextMenuInstance->RemoveFromParent();
+		RTSNPCContextMenuInstance = nullptr;
+		return;
+	}
+
+	{
+		bShowMouseCursor = true;
+		FInputModeGameAndUI InputMode;
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		InputMode.SetHideCursorDuringCapture(false);
+		if (RTSNPCContextMenuInstance)
+		{
+			InputMode.SetWidgetToFocus(RTSNPCContextMenuInstance->TakeWidget());
+		}
+		SetInputMode(InputMode);
+
+		if (FSlateApplication::IsInitialized())
+		{
+			FSlateApplication::Get().ReleaseAllPointerCapture();
+		}
+	}
+
+	TheHouseRTSContextDebug::Screen(
+		this,
+		FString::Printf(TEXT("[RTSNPCContext] Opened (%s) for %s at (%.0f,%.0f)"),
+			*GetNameSafe(RTSNPCContextMenuInstance->GetClass()),
+			*Npc->GetName(),
+			MenuScreenPos.X, MenuScreenPos.Y),
+		FColor::Green);
+
+	if (UWorld* WorldForTime = GetWorld())
+	{
+		LastRTSContextMenuTryOpenTimeSeconds = WorldForTime->GetTimeSeconds();
+	}
+}
+
+bool ATheHousePlayerController::IsActorInRTSSelection(AActor* Actor) const
+{
+	if (!IsValid(Actor))
+	{
+		return false;
+	}
+	for (const TWeakObjectPtr<AActor>& W : RTSSelectedActors)
+	{
+		if (W.Get() == Actor)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool ATheHousePlayerController::HasSelectedNPCsForRTSOrders() const
+{
+	for (const TWeakObjectPtr<AActor>& W : RTSSelectedActors)
+	{
+		if (ATheHouseNPCCharacter* Npc = Cast<ATheHouseNPCCharacter>(W.Get()))
+		{
+			if (IsValid(Npc) && Npc->IsSelectable())
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+void ATheHousePlayerController::GetSelectedNPCsForRTSOrders(TArray<ATheHouseNPCCharacter*>& OutNPCs) const
+{
+	OutNPCs.Reset();
+	for (const TWeakObjectPtr<AActor>& W : RTSSelectedActors)
+	{
+		if (ATheHouseNPCCharacter* Npc = Cast<ATheHouseNPCCharacter>(W.Get()))
+		{
+			if (IsValid(Npc) && Npc->IsSelectable())
+			{
+				OutNPCs.Add(Npc);
+			}
+		}
+	}
+}
+
+void ATheHousePlayerController::TheHouse_OpenNPCOrderOnObjectMenuShared(ATheHouseObject* Obj, const FVector2D& MenuScreenPos)
+{
+	if (!IsValid(Obj) || Obj == PreviewActor || Obj->IsPlacementPreviewActor())
+	{
+		return;
+	}
+
+	if (UWorld* WorldForTime = GetWorld())
+	{
+		const double NowSec = WorldForTime->GetTimeSeconds();
+		if (LastRTSContextMenuTryOpenTimeSeconds >= 0.0 &&
+			(NowSec - LastRTSContextMenuTryOpenTimeSeconds) < TheHouse_RTSContextMenuTryOpenMinIntervalSeconds)
+		{
+			return;
+		}
+	}
+
+	CloseRTSContextMenu();
+	ClosePlacedObjectSettingsWidget();
+
+	NPCOrderOnObjectRuntimeOptionDefs.Reset();
+	GatherNPCOrderActionsOnObject(Obj, NPCOrderOnObjectRuntimeOptionDefs);
+
+	UClass* MenuWidgetClass = NPCOrderContextMenuWidgetClass ? NPCOrderContextMenuWidgetClass.Get()
+															 : UTheHouseNPCOrderContextMenuUMGWidget::StaticClass();
+	if (!MenuWidgetClass->IsChildOf(UTheHouseNPCOrderContextMenuUMGWidget::StaticClass()))
+	{
+#if !UE_BUILD_SHIPPING
+		UE_LOG(LogTemp, Error,
+			TEXT("[RTS|NPCOrder] NPCOrderContextMenuWidgetClass (%s) doit hériter de UTheHouseNPCOrderContextMenuUMGWidget — fallback C++."),
+			*GetNameSafe(MenuWidgetClass));
+#endif
+		MenuWidgetClass = UTheHouseNPCOrderContextMenuUMGWidget::StaticClass();
+	}
+
+	RTSNPCOrderOnObjectMenuInstance = CreateWidget<UUserWidget>(this, MenuWidgetClass);
+	if (!RTSNPCOrderOnObjectMenuInstance)
+	{
+		TheHouseRTSContextDebug::Screen(this, TEXT("[RTS|NPCOrder|Obj] CreateWidget failed"), FColor::Red);
+		return;
+	}
+
+	RTSNPCOrderOnObjectMenuInstance->SetVisibility(ESlateVisibility::Visible);
+	RTSNPCOrderOnObjectMenuInstance->SetRenderOpacity(1.f);
+	RTSNPCOrderOnObjectMenuInstance->SetIsEnabled(true);
+	RTSNPCOrderOnObjectMenuInstance->AddToViewport(100000);
+
+	bool bOpenedMenuContent = false;
+	if (UTheHouseNPCOrderContextMenuUMGWidget* UMG = Cast<UTheHouseNPCOrderContextMenuUMGWidget>(RTSNPCOrderOnObjectMenuInstance))
+	{
+		UMG->OpenForOrderOnObject(this, Obj, MenuScreenPos);
+		bOpenedMenuContent = true;
+	}
+
+	if (!bOpenedMenuContent && RTSNPCOrderOnObjectMenuInstance)
+	{
+#if !UE_BUILD_SHIPPING
+		UE_LOG(LogTemp, Error, TEXT("[RTS|NPCOrder|Obj] OpenForOrderOnObject impossible (cast). Classe=%s"),
+			*GetNameSafe(RTSNPCOrderOnObjectMenuInstance->GetClass()));
+#endif
+		RTSNPCOrderOnObjectMenuInstance->RemoveFromParent();
+		RTSNPCOrderOnObjectMenuInstance = nullptr;
+		return;
+	}
+
+	{
+		bShowMouseCursor = true;
+		FInputModeGameAndUI InputMode;
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		InputMode.SetHideCursorDuringCapture(false);
+		if (RTSNPCOrderOnObjectMenuInstance)
+		{
+			InputMode.SetWidgetToFocus(RTSNPCOrderOnObjectMenuInstance->TakeWidget());
+		}
+		SetInputMode(InputMode);
+
+		if (FSlateApplication::IsInitialized())
+		{
+			FSlateApplication::Get().ReleaseAllPointerCapture();
+		}
+	}
+
+#if !UE_BUILD_SHIPPING
+	TheHouseRTSContextDebug::Screen(
+		this,
+		FString::Printf(TEXT("[RTS|NPCOrder|Obj] Opened (%s) for %s"),
+			*GetNameSafe(RTSNPCOrderOnObjectMenuInstance->GetClass()),
+			*Obj->GetName()),
+		FColor::Green);
+#endif
+
+	if (UWorld* WorldForTime = GetWorld())
+	{
+		LastRTSContextMenuTryOpenTimeSeconds = WorldForTime->GetTimeSeconds();
+	}
+}
+
+void ATheHousePlayerController::TheHouse_OpenNPCOrderOnNPCMenuShared(ATheHouseNPCCharacter* Npc, const FVector2D& MenuScreenPos)
+{
+	if (!IsValid(Npc) || !Npc->IsSelectable())
+	{
+		return;
+	}
+
+	if (UWorld* WorldForTime = GetWorld())
+	{
+		const double NowSec = WorldForTime->GetTimeSeconds();
+		if (LastRTSContextMenuTryOpenTimeSeconds >= 0.0 &&
+			(NowSec - LastRTSContextMenuTryOpenTimeSeconds) < TheHouse_RTSContextMenuTryOpenMinIntervalSeconds)
+		{
+			return;
+		}
+	}
+
+	CloseRTSContextMenu();
+	ClosePlacedObjectSettingsWidget();
+
+	NPCOrderOnNPCRuntimeOptionDefs.Reset();
+	GatherNPCOrderActionsOnNPC(Npc, NPCOrderOnNPCRuntimeOptionDefs);
+
+	UClass* MenuWidgetClass = NPCOrderContextMenuWidgetClass ? NPCOrderContextMenuWidgetClass.Get()
+															 : UTheHouseNPCOrderContextMenuUMGWidget::StaticClass();
+	if (!MenuWidgetClass->IsChildOf(UTheHouseNPCOrderContextMenuUMGWidget::StaticClass()))
+	{
+#if !UE_BUILD_SHIPPING
+		UE_LOG(LogTemp, Error,
+			TEXT("[RTS|NPCOrder|NPC] NPCOrderContextMenuWidgetClass (%s) doit hériter de UTheHouseNPCOrderContextMenuUMGWidget — fallback C++."),
+			*GetNameSafe(MenuWidgetClass));
+#endif
+		MenuWidgetClass = UTheHouseNPCOrderContextMenuUMGWidget::StaticClass();
+	}
+
+	RTSNPCOrderOnNPCMenuInstance = CreateWidget<UUserWidget>(this, MenuWidgetClass);
+	if (!RTSNPCOrderOnNPCMenuInstance)
+	{
+		TheHouseRTSContextDebug::Screen(this, TEXT("[RTS|NPCOrder|NPC] CreateWidget failed"), FColor::Red);
+		return;
+	}
+
+	RTSNPCOrderOnNPCMenuInstance->SetVisibility(ESlateVisibility::Visible);
+	RTSNPCOrderOnNPCMenuInstance->SetRenderOpacity(1.f);
+	RTSNPCOrderOnNPCMenuInstance->SetIsEnabled(true);
+	RTSNPCOrderOnNPCMenuInstance->AddToViewport(100000);
+
+	bool bOpenedMenuContent = false;
+	if (UTheHouseNPCOrderContextMenuUMGWidget* UMG = Cast<UTheHouseNPCOrderContextMenuUMGWidget>(RTSNPCOrderOnNPCMenuInstance))
+	{
+		UMG->OpenForOrderOnNPC(this, Npc, MenuScreenPos);
+		bOpenedMenuContent = true;
+	}
+
+	if (!bOpenedMenuContent && RTSNPCOrderOnNPCMenuInstance)
+	{
+#if !UE_BUILD_SHIPPING
+		UE_LOG(LogTemp, Error, TEXT("[RTS|NPCOrder|NPC] OpenForOrderOnNPC impossible (cast). Classe=%s"),
+			*GetNameSafe(RTSNPCOrderOnNPCMenuInstance->GetClass()));
+#endif
+		RTSNPCOrderOnNPCMenuInstance->RemoveFromParent();
+		RTSNPCOrderOnNPCMenuInstance = nullptr;
+		return;
+	}
+
+	{
+		bShowMouseCursor = true;
+		FInputModeGameAndUI InputMode;
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		InputMode.SetHideCursorDuringCapture(false);
+		if (RTSNPCOrderOnNPCMenuInstance)
+		{
+			InputMode.SetWidgetToFocus(RTSNPCOrderOnNPCMenuInstance->TakeWidget());
+		}
+		SetInputMode(InputMode);
+
+		if (FSlateApplication::IsInitialized())
+		{
+			FSlateApplication::Get().ReleaseAllPointerCapture();
+		}
+	}
+
+#if !UE_BUILD_SHIPPING
+	TheHouseRTSContextDebug::Screen(
+		this,
+		FString::Printf(TEXT("[RTS|NPCOrder|NPC] Opened (%s) for %s"),
+			*GetNameSafe(RTSNPCOrderOnNPCMenuInstance->GetClass()),
+			*Npc->GetName()),
+		FColor::Green);
+#endif
+
+	if (UWorld* WorldForTime = GetWorld())
+	{
+		LastRTSContextMenuTryOpenTimeSeconds = WorldForTime->GetTimeSeconds();
+	}
+}
+
+void ATheHousePlayerController::TheHouse_OpenNPCOrderOnGroundMenuShared(const FVector& GroundLocation, const FVector2D& MenuScreenPos)
+{
+	if (UWorld* WorldForTime = GetWorld())
+	{
+		const double NowSec = WorldForTime->GetTimeSeconds();
+		if (LastRTSContextMenuTryOpenTimeSeconds >= 0.0 &&
+			(NowSec - LastRTSContextMenuTryOpenTimeSeconds) < TheHouse_RTSContextMenuTryOpenMinIntervalSeconds)
+		{
+			return;
+		}
+	}
+
+	CloseRTSContextMenu();
+	ClosePlacedObjectSettingsWidget();
+
+	LastNPCOrderGroundTarget = GroundLocation;
+
+	NPCOrderOnGroundRuntimeOptionDefs.Reset();
+	GatherNPCOrderActionsOnGround(NPCOrderOnGroundRuntimeOptionDefs);
+
+	UClass* MenuWidgetClass = NPCOrderContextMenuWidgetClass ? NPCOrderContextMenuWidgetClass.Get()
+															 : UTheHouseNPCOrderContextMenuUMGWidget::StaticClass();
+	if (!MenuWidgetClass->IsChildOf(UTheHouseNPCOrderContextMenuUMGWidget::StaticClass()))
+	{
+#if !UE_BUILD_SHIPPING
+		UE_LOG(LogTemp, Error,
+			TEXT("[RTS|NPCOrder|Ground] NPCOrderContextMenuWidgetClass (%s) doit hériter de UTheHouseNPCOrderContextMenuUMGWidget — fallback C++."),
+			*GetNameSafe(MenuWidgetClass));
+#endif
+		MenuWidgetClass = UTheHouseNPCOrderContextMenuUMGWidget::StaticClass();
+	}
+
+	RTSNPCOrderOnGroundMenuInstance = CreateWidget<UUserWidget>(this, MenuWidgetClass);
+	if (!RTSNPCOrderOnGroundMenuInstance)
+	{
+		TheHouseRTSContextDebug::Screen(this, TEXT("[RTS|NPCOrder|Ground] CreateWidget failed"), FColor::Red);
+		return;
+	}
+
+	RTSNPCOrderOnGroundMenuInstance->SetVisibility(ESlateVisibility::Visible);
+	RTSNPCOrderOnGroundMenuInstance->SetRenderOpacity(1.f);
+	RTSNPCOrderOnGroundMenuInstance->SetIsEnabled(true);
+	RTSNPCOrderOnGroundMenuInstance->AddToViewport(100000);
+
+	bool bOpenedMenuContent = false;
+	if (UTheHouseNPCOrderContextMenuUMGWidget* UMG = Cast<UTheHouseNPCOrderContextMenuUMGWidget>(RTSNPCOrderOnGroundMenuInstance))
+	{
+		UMG->OpenForOrderOnGround(this, GroundLocation, MenuScreenPos);
+		bOpenedMenuContent = true;
+	}
+
+	if (!bOpenedMenuContent && RTSNPCOrderOnGroundMenuInstance)
+	{
+#if !UE_BUILD_SHIPPING
+		UE_LOG(LogTemp, Error, TEXT("[RTS|NPCOrder|Ground] OpenForOrderOnGround impossible (cast). Classe=%s"),
+			*GetNameSafe(RTSNPCOrderOnGroundMenuInstance->GetClass()));
+#endif
+		RTSNPCOrderOnGroundMenuInstance->RemoveFromParent();
+		RTSNPCOrderOnGroundMenuInstance = nullptr;
+		return;
+	}
+
+	{
+		bShowMouseCursor = true;
+		FInputModeGameAndUI InputMode;
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		InputMode.SetHideCursorDuringCapture(false);
+		if (RTSNPCOrderOnGroundMenuInstance)
+		{
+			InputMode.SetWidgetToFocus(RTSNPCOrderOnGroundMenuInstance->TakeWidget());
+		}
+		SetInputMode(InputMode);
+
+		if (FSlateApplication::IsInitialized())
+		{
+			FSlateApplication::Get().ReleaseAllPointerCapture();
+		}
+	}
+
+#if !UE_BUILD_SHIPPING
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(
+			-1,
+			2.5f,
+			FColor::Green,
+			FString::Printf(TEXT("[RTS|NPCOrder|Ground] Menu ouvert (%s) pos=(%.0f,%.0f) options=%d"),
+				*GetNameSafe(RTSNPCOrderOnGroundMenuInstance->GetClass()),
+				MenuScreenPos.X, MenuScreenPos.Y,
+				NPCOrderOnGroundRuntimeOptionDefs.Num()));
+	}
+#endif
+
+	if (UWorld* WorldForTime = GetWorld())
+	{
+		LastRTSContextMenuTryOpenTimeSeconds = WorldForTime->GetTimeSeconds();
+	}
+}
+
+void ATheHousePlayerController::TryOpenRTSContextMenuAtCursor()
+{
+	ATheHouseCameraPawn* const RtsPawn = Cast<ATheHouseCameraPawn>(GetPawn());
+	if (!RtsPawn)
+	{
+		TheHouseRTSContextDebug::Screen(this, TEXT("[RTSContext] Ignored: besoin du pawn caméra RTS"), FColor::Silver);
+		return;
+	}
+	if (RTSPawnReference != RtsPawn)
+	{
+		RTSPawnReference = RtsPawn;
+	}
+	if (IsRtsCameraRotateModifierPhysicallyDown())
+	{
+		TheHouseRTSContextDebug::Screen(this, TEXT("[RTSContext] Ignored: Alt held (camera rotate)"), FColor::Silver);
+		return;
+	}
+
+	TMap<AActor*, FHitResult> Merged;
+	CollectMergedRTSLineHitsUnderCursor(Merged);
+
+	ATheHouseNPCCharacter* BestNpc = nullptr;
+	float BestNpcDist = TNumericLimits<float>::Max();
+	ATheHouseObject* BestObj = nullptr;
+	float BestObjDist = TNumericLimits<float>::Max();
+
+	for (const TPair<AActor*, FHitResult>& P : Merged)
+	{
+		if (ATheHouseNPCCharacter* Npc = Cast<ATheHouseNPCCharacter>(P.Key))
+		{
+			if (Npc->IsSelectable() && P.Value.Distance < BestNpcDist)
+			{
+				BestNpcDist = P.Value.Distance;
+				BestNpc = Npc;
+			}
+		}
+
+		if (ATheHouseObject* Obj = Cast<ATheHouseObject>(P.Key))
+		{
+			if (IsValid(Obj) && Obj != PreviewActor && !Obj->IsPlacementPreviewActor() && P.Value.Distance < BestObjDist)
+			{
+				BestObjDist = P.Value.Distance;
+				BestObj = Obj;
+			}
+		}
+	}
+
+	if (BestNpc && BestObj)
+	{
+		if (BestNpcDist <= BestObjDist)
+		{
+			BestObj = nullptr;
+		}
+		else
+		{
+			BestNpc = nullptr;
+		}
+	}
+
+	const bool bHasOrderNPCs = HasSelectedNPCsForRTSOrders();
+
+	if (BestNpc)
+	{
+		const bool bNpcIsInSelection = IsActorInRTSSelection(BestNpc);
+		const bool bCanOpenNpcOrderMenu =
+			bHasOrderNPCs && (!bNpcIsInSelection || HasRTSSelectionActorOtherThan(BestNpc));
+
+		if (bCanOpenNpcOrderMenu)
+		{
+			TheHouse_OpenNPCOrderOnNPCMenuShared(BestNpc, TheHouse_GetContextMenuViewportPosition());
+			return;
+		}
+
+		EnsureDefaultNPCRTSContextMenuDefs();
+		TheHouse_OpenRTSContextMenuForNPCShared(BestNpc, TheHouse_GetContextMenuViewportPosition());
+		return;
+	}
+
+	if (BestObj)
+	{
+		if (bHasOrderNPCs)
+		{
+			TheHouse_OpenNPCOrderOnObjectMenuShared(BestObj, TheHouse_GetContextMenuViewportPosition());
+			return;
+		}
+
+		TheHouse_OpenRTSContextMenuShared(BestObj, TheHouse_GetContextMenuViewportPosition());
+		return;
+	}
+
+	FVector GroundLoc;
+	if (!TryResolveGroundClickLocation(Merged, GroundLoc))
+	{
+		CloseRTSContextMenu();
+		TheHouseRTSContextDebug::Screen(this, TEXT("[RTSContext] Pas de sol / pas de trace sous le curseur"), FColor::Orange);
+		return;
+	}
+
+	if (bHasOrderNPCs)
+	{
+		TheHouse_OpenNPCOrderOnGroundMenuShared(GroundLoc, TheHouse_GetContextMenuViewportPosition());
+		return;
+	}
+
+	IssueMoveOrdersToSelectedNPCsAtLocation(GroundLoc);
+	CloseRTSContextMenu();
+
+#if !UE_BUILD_SHIPPING
+	TheHouseRTSContextDebug::Screen(
+		this,
+		FString::Printf(TEXT("[RTSContext] Ordre MoveTo — point (%.0f, %.0f, %.0f)"), GroundLoc.X, GroundLoc.Y, GroundLoc.Z),
+		FColor::Cyan);
+#endif
+}
+
+void ATheHousePlayerController::TryOpenRTSContextMenuForNPC(ATheHouseNPCCharacter* Npc)
+{
+	ATheHouseCameraPawn* const RtsPawn = Cast<ATheHouseCameraPawn>(GetPawn());
+	if (!RtsPawn)
+	{
+		return;
+	}
+	if (RTSPawnReference != RtsPawn)
+	{
+		RTSPawnReference = RtsPawn;
+	}
+	if (IsRtsCameraRotateModifierPhysicallyDown())
+	{
+		return;
+	}
+	if (!IsValid(Npc) || !Npc->IsSelectable())
+	{
+		return;
+	}
+
+	EnsureDefaultNPCRTSContextMenuDefs();
+	TheHouse_OpenRTSContextMenuForNPCShared(Npc, TheHouse_GetContextMenuViewportPosition());
+}
+
+void ATheHousePlayerController::TryOpenRTSContextMenuForObject(ATheHouseObject* Obj)
+{
+	ATheHouseCameraPawn* const RtsPawn = Cast<ATheHouseCameraPawn>(GetPawn());
+	if (!RtsPawn)
+	{
+		return;
+	}
+	if (RTSPawnReference != RtsPawn)
+	{
+		RTSPawnReference = RtsPawn;
+	}
+	if (IsRtsCameraRotateModifierPhysicallyDown())
+	{
+		return;
+	}
+	if (!IsValid(Obj) || Obj->IsPlacementPreviewActor())
+	{
+		return;
+	}
+
+	TheHouse_OpenRTSContextMenuShared(Obj, TheHouse_GetContextMenuViewportPosition());
+}
+
+bool ATheHousePlayerController::TheHouse_IsModalRtsUiBlockingWorldSelection() const
+{
+	if (!FSlateApplication::IsInitialized())
+	{
+		return false;
+	}
+
+	const FVector2D AbsMouse = FSlateApplication::Get().GetCursorPos();
+
+	auto IsUnderGeometry = [&](const UUserWidget* W) -> bool
+	{
+		if (!IsValid(W))
+		{
+			return false;
+		}
+		const FGeometry& Geo = W->GetCachedGeometry();
+		if (Geo.GetLocalSize().IsNearlyZero())
+		{
+			return false;
+		}
+		return USlateBlueprintLibrary::IsUnderLocation(Geo, AbsMouse);
+	};
+
+	return IsUnderGeometry(RTSContextMenuInstance) ||
+		   IsUnderGeometry(RTSNPCContextMenuInstance) ||
+		   IsUnderGeometry(RTSNPCOrderOnObjectMenuInstance) ||
+		   IsUnderGeometry(RTSNPCOrderOnNPCMenuInstance) ||
+		   IsUnderGeometry(RTSNPCOrderOnGroundMenuInstance) ||
+		   IsUnderGeometry(PlacedObjectSettingsWidgetInstance);
+}
+
+bool ATheHousePlayerController::TheHouse_IsCursorOverBlockingRTSViewportUI() const
+{
+	if (TheHouse_IsModalRtsUiBlockingWorldSelection())
+	{
+		return true;
+	}
+
+	if (!FSlateApplication::IsInitialized())
+	{
+		return false;
+	}
+
+	const FVector2D AbsMouse = FSlateApplication::Get().GetCursorPos();
+
+	// Ne pas utiliser IsUnderLocation(RTSMainWidgetInstance) : la géométrie du root WBP couvre souvent
+	// tout l’écran (même zones « vides »), ce qui empêchait bRtsSelectGestureFromWorld, le rectangle HUD,
+	// et les clics sur le monde. On ne bloque le panneau principal que si le chemin Slate pointe vers
+	// un UMG réellement hit-testable (ESlateVisibility::Visible) dans cet arbre.
+	const TArray<TSharedRef<SWindow>> Windows = FSlateApplication::Get().GetInteractiveTopLevelWindows();
+	const FWidgetPath Path =
+		FSlateApplication::Get().LocateWindowUnderMouse(AbsMouse, Windows, false);
+	return TheHouse_SlatePathBlocksRtsWorldSelection(
+		Path,
+		RTSMainWidgetInstance.Get(),
+		RTSContextMenuInstance.Get(),
+		RTSNPCContextMenuInstance.Get(),
+		PlacedObjectSettingsWidgetInstance.Get(),
+		RTSNPCOrderOnObjectMenuInstance.Get(),
+		RTSNPCOrderOnNPCMenuInstance.Get(),
+		RTSNPCOrderOnGroundMenuInstance.Get());
 }
 
 void ATheHousePlayerController::Input_CancelOrCloseRts()
 {
-	CloseRTSContextMenu();
+	TryConsumeEscapeForRtsUi();
+}
+
+bool ATheHousePlayerController::TryConsumeEscapeForRtsUi()
+{
+	bool bHandled = false;
+
+	if (AnyRTSContextMenuOpen())
+	{
+		CloseRTSContextMenu();
+		bHandled = true;
+	}
+
+	if (PlacedObjectSettingsWidgetInstance)
+	{
+		ClosePlacedObjectSettingsWidget();
+		bHandled = true;
+	}
+
+	const bool bRts = (RTSPawnReference && GetPawn() == RTSPawnReference);
+
+	if (bRts && bIsSelecting)
+	{
+		bIsSelecting = false;
+		if (ATheHouseHUD* HUD = Cast<ATheHouseHUD>(GetHUD()))
+		{
+			HUD->StopSelection();
+		}
+		bHandled = true;
+	}
 
 	if (PlacementState == EPlacementState::Previewing)
 	{
 		CancelPlacement();
+		bHandled = true;
 	}
+
+	if (bRts && RTSSelectedActors.Num() > 0)
+	{
+		RTS_DeselectAll();
+		bHandled = true;
+	}
+
+	if (bRts && RTSMainWidgetInstance && RTSMainWidgetInstance->EscapeCloseOverlays())
+	{
+		bHandled = true;
+	}
+
+	return bHandled;
 }
 
 void ATheHousePlayerController::Input_RTSObjectContext()
 {
-	TryOpenRTSContextMenuAtCursor();
+	// Volontairement vide : l’ouverture au clic droit est traitée uniquement dans
+	// TheHouse_PollInputFrame (état physique RMB). Un binding résiduel (Blueprint,
+	// Enhanced Input, ancien DefaultInput) sur la même action + TryOpen ici
+	// générait des logs [RTSContext] Opened en rafale et un menu instable.
+	// Pour ouvrir le menu depuis un BP : appeler TryOpenRTSContextMenuAtCursor().
 }
 
-void ATheHousePlayerController::RTS_DeletePlacedObject(ATheHouseObject* Obj)
+void ATheHousePlayerController::AddMoney(int32 Delta)
+{
+	if (Delta == 0)
+	{
+		return;
+	}
+	Money = FMath::Max(0, Money + Delta);
+	RefreshRTSMainWidget();
+}
+
+void ATheHousePlayerController::SetMoney(int32 NewMoney)
+{
+	Money = FMath::Max(0, NewMoney);
+	RefreshRTSMainWidget();
+}
+
+int32 ATheHousePlayerController::GetPurchasePriceForClass(TSubclassOf<ATheHouseObject> ObjectClass) const
+{
+	if (!ObjectClass)
+	{
+		return 0;
+	}
+	if (const ATheHouseObject* CDO = ObjectClass.GetDefaultObject())
+	{
+		return FMath::Max(0, CDO->PurchasePrice);
+	}
+	return 0;
+}
+
+bool ATheHousePlayerController::CanAffordCatalogPurchaseForClass(TSubclassOf<ATheHouseObject> ObjectClass) const
+{
+	return Money >= GetPurchasePriceForClass(ObjectClass);
+}
+
+void ATheHousePlayerController::ClosePlacedObjectSettingsWidget()
+{
+	PlacedObjectSettingsLastBoundObject.Reset();
+	if (PlacedObjectSettingsWidgetInstance)
+	{
+		PlacedObjectSettingsWidgetInstance->RemoveFromParent();
+		PlacedObjectSettingsWidgetInstance = nullptr;
+	}
+}
+
+void ATheHousePlayerController::ClosePlacedObjectSettingsPanel()
+{
+	ClosePlacedObjectSettingsWidget();
+}
+
+void ATheHousePlayerController::OpenPlacedObjectSettingsWidgetFor(ATheHouseObject* Obj)
+{
+	if (!IsValid(Obj) || Obj->IsPlacementPreviewActor())
+	{
+		ClosePlacedObjectSettingsWidget();
+		return;
+	}
+	if (!Obj->bOpenParametersPanelOnLeftClick)
+	{
+		ClosePlacedObjectSettingsWidget();
+		return;
+	}
+	if (!PlacedObjectSettingsWidgetClass)
+	{
+		ClosePlacedObjectSettingsWidget();
+		return;
+	}
+	if (!RTSPawnReference || GetPawn() != RTSPawnReference)
+	{
+		return;
+	}
+
+	if (PlacedObjectSettingsWidgetInstance && IsValid(PlacedObjectSettingsWidgetInstance))
+	{
+		const bool bSameTarget =
+			(PlacedObjectSettingsWidgetInstance->GetTargetPlacedObject() == Obj) ||
+			(PlacedObjectSettingsLastBoundObject.Get() == Obj);
+		if (bSameTarget)
+		{
+			PlacedObjectSettingsWidgetInstance->SetTargetPlacedObject(Obj);
+			PlacedObjectSettingsLastBoundObject = Obj;
+			return;
+		}
+	}
+
+	ClosePlacedObjectSettingsWidget();
+	PlacedObjectSettingsWidgetInstance = CreateWidget<UTheHousePlacedObjectSettingsWidget>(
+		this,
+		PlacedObjectSettingsWidgetClass);
+	if (!PlacedObjectSettingsWidgetInstance)
+	{
+		return;
+	}
+	PlacedObjectSettingsWidgetInstance->SetTargetPlacedObject(Obj);
+	PlacedObjectSettingsLastBoundObject = Obj;
+	// Au-dessus du panneau RTS (~10) et du menu contextuel (100000) — un Z trop bas peut laisser le WBP "sous" d'autres couches UMG.
+	PlacedObjectSettingsWidgetInstance->SetVisibility(ESlateVisibility::Visible);
+	PlacedObjectSettingsWidgetInstance->AddToViewport(200000);
+}
+
+void ATheHousePlayerController::RTS_SellPlacedObject(ATheHouseObject* Obj)
 {
 	if (!IsValid(Obj) || Obj == PreviewActor)
 	{
 		return;
 	}
 
+	if (PlacedObjectSettingsWidgetInstance && PlacedObjectSettingsWidgetInstance->GetTargetPlacedObject() == Obj)
+	{
+		ClosePlacedObjectSettingsWidget();
+	}
+
 	TArray<FIntPoint> Cells;
 	GetFootprintCellsForTransform(Obj, Obj->GetActorTransform(), Cells);
 	MarkCellsFree(Cells);
+
+	RTSSelectedActors.RemoveAllSwap([&](const TWeakObjectPtr<AActor>& W)
+	{
+		return W.Get() == Obj;
+	});
 
 	if (ITheHouseSelectable* Sel = Cast<ITheHouseSelectable>(Obj))
 	{
 		Sel->OnDeselect();
 	}
 
+	const int32 SaleValue = (Obj->SellValue > 0) ? Obj->SellValue : Obj->PurchasePrice;
+	AddMoney(FMath::Max(0, SaleValue));
 	Obj->Destroy();
 }
 
@@ -1897,42 +4249,157 @@ void ATheHousePlayerController::RTS_StorePlacedObject(ATheHouseObject* Obj)
 		return;
 	}
 
+	if (PlacedObjectSettingsWidgetInstance && PlacedObjectSettingsWidgetInstance->GetTargetPlacedObject() == Obj)
+	{
+		ClosePlacedObjectSettingsWidget();
+	}
+
 	TArray<FIntPoint> Cells;
 	GetFootprintCellsForTransform(Obj, Obj->GetActorTransform(), Cells);
 	MarkCellsFree(Cells);
+
+	RTSSelectedActors.RemoveAllSwap([&](const TWeakObjectPtr<AActor>& W)
+	{
+		return W.Get() == Obj;
+	});
 
 	if (ITheHouseSelectable* Sel = Cast<ITheHouseSelectable>(Obj))
 	{
 		Sel->OnDeselect();
 	}
 
-	StoredPlaceables.Add(TSubclassOf<ATheHouseObject>(Obj->GetClass()));
+	AddOrIncrementStoredStock(TSubclassOf<ATheHouseObject>(Obj->GetClass()));
 	Obj->Destroy();
+}
+
+namespace
+{
+	// Les défauts C++ utilisent Delete / Store ; si les entrées du tableau ont été mal
+	// configurées (OptionId = libellé « Vendre » au lieu de Delete), on accepte des alias.
+	bool IsRTSSellContextOption(FName OptionId)
+	{
+		using namespace TheHouseRTSContextIds;
+		return OptionId == DeleteObject
+			|| OptionId == FName(TEXT("Vendre"))
+			|| OptionId == FName(TEXT("Sell"));
+	}
+
+	bool IsRTSStoreContextOption(FName OptionId)
+	{
+		using namespace TheHouseRTSContextIds;
+		return OptionId == StoreObject
+			|| OptionId == FName(TEXT("MettreEnStock"))
+			|| OptionId == FName(TEXT("Mettre en stock"))
+			|| OptionId == FName(TEXT("Stock"));
+	}
+
+	bool IsRTSRelocateContextOption(FName OptionId)
+	{
+		using namespace TheHouseRTSContextIds;
+		return OptionId == RelocateObject
+			|| OptionId == FName(TEXT("Move"))
+			|| OptionId == FName(TEXT("Deplacer"))
+			|| OptionId == FName(TEXT("Déplacer"));
+	}
 }
 
 void ATheHousePlayerController::ExecuteRTSContextMenuOption(FName OptionId, ATheHouseObject* TargetObject)
 {
+#if !UE_BUILD_SHIPPING
+	// Toujours visible dans la sortie PIE (sans activer TheHouse.RTS.ContextMenu.Debug).
+	UE_LOG(LogTemp, Warning, TEXT("[RTSContext] ExecuteRTSContextMenuOption: OptionId=%s Target=%s"),
+		*OptionId.ToString(), TargetObject ? *TargetObject->GetName() : TEXT("null"));
+#endif
+
 	if (!IsValid(TargetObject) || TargetObject == PreviewActor || TargetObject->IsPlacementPreviewActor())
 	{
 		CloseRTSContextMenu();
 		return;
 	}
 
-	if (OptionId == TheHouseRTSContextIds::DeleteObject)
+#if !UE_BUILD_SHIPPING
+	TheHouseRTSContextDebug::Screen(
+		this,
+		FString::Printf(TEXT("[RTSContext] Pick option=%s target=%s"), *OptionId.ToString(), *TargetObject->GetName()),
+		FColor::Cyan);
+#endif
+
+	if (IsRTSRelocateContextOption(OptionId))
 	{
-		RTS_DeletePlacedObject(TargetObject);
+		StartRelocationPreviewForPlacedObject(TargetObject);
 	}
-	else if (OptionId == TheHouseRTSContextIds::StoreObject)
+	else if (IsRTSSellContextOption(OptionId))
+	{
+		RTS_SellPlacedObject(TargetObject);
+	}
+	else if (IsRTSStoreContextOption(OptionId))
 	{
 		RTS_StorePlacedObject(TargetObject);
 	}
 	else
 	{
+#if !UE_BUILD_SHIPPING
+		UE_LOG(LogTemp, Warning, TEXT("[RTSContext] OptionId non géré : %s (attendu Delete/Store/Relocate ou alias Vendre/…) — HandleRTSContextMenuOption"),
+			*OptionId.ToString());
+#endif
 		HandleRTSContextMenuOption(OptionId, TargetObject);
 	}
 
 	CloseRTSContextMenu();
 	RefreshRTSMainWidget();
+}
+
+void ATheHousePlayerController::ExecuteNPCRTSContextMenuOption(FName OptionId, ATheHouseNPCCharacter* TargetNPC)
+{
+#if !UE_BUILD_SHIPPING
+	UE_LOG(LogTemp, Warning, TEXT("[RTSNPCContext] ExecuteNPCRTSContextMenuOption: OptionId=%s Target=%s"),
+		*OptionId.ToString(), TargetNPC ? *TargetNPC->GetName() : TEXT("null"));
+#endif
+
+	if (!IsValid(TargetNPC))
+	{
+		CloseRTSContextMenu();
+		return;
+	}
+
+	using namespace TheHouseNPCContextIds;
+
+	if (OptionId == UsePlacedObjectAtCursor)
+	{
+		if (ATheHouseObject* ObjUnderCursor = FindPlacedTheHouseObjectUnderCursor())
+		{
+			if (UTheHouseObjectSlotUserComponent* SlotComp = TargetNPC->FindComponentByClass<UTheHouseObjectSlotUserComponent>())
+			{
+				SlotComp->UseObjectSlot(ObjUnderCursor, NAME_None, nullptr);
+			}
+#if !UE_BUILD_SHIPPING
+			else
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("[RTSNPCContext] Pas de UTheHouseObjectSlotUserComponent sur %s — ajoutez le composant au PNJ."),
+					*TargetNPC->GetName());
+			}
+#endif
+		}
+#if !UE_BUILD_SHIPPING
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[RTSNPCContext] UsePlacedObjectAtCursor : aucun ATheHouseObject sous le curseur."));
+		}
+#endif
+	}
+	else
+	{
+		HandleNPCRTSContextMenuOption(OptionId, TargetNPC);
+	}
+
+	CloseRTSContextMenu();
+	RefreshRTSMainWidget();
+}
+
+void ATheHousePlayerController::NotifyRtsOrderMenuOptionClickedFromUi()
+{
+	bRtsSuppressNextSelectReleaseWorldPick = true;
 }
 
 void ATheHousePlayerController::RefreshRTSMainWidget()
@@ -1947,4 +4414,208 @@ void ATheHousePlayerController::HandleRTSContextMenuOption_Implementation(FName 
 {
 	(void)OptionId;
 	(void)TargetObject;
+}
+
+void ATheHousePlayerController::HandleNPCRTSContextMenuOption_Implementation(FName OptionId, ATheHouseNPCCharacter* TargetNPC)
+{
+	(void)OptionId;
+	(void)TargetNPC;
+}
+
+void ATheHousePlayerController::GatherNPCOrderActionsOnObject_Implementation(
+	ATheHouseObject* TargetObject,
+	TArray<FTheHouseRTSContextMenuOptionDef>& OutOptionDefs)
+{
+	(void)TargetObject;
+	// Par défaut : une entrée « debug » pour que le menu soit visible sans BP.
+	if (OutOptionDefs.Num() == 0)
+	{
+		FTheHouseRTSContextMenuOptionDef D;
+		D.OptionId = FName(TEXT("DebugOrder"));
+		D.Label = FText::FromString(TEXT("Debug order (override in BP)"));
+		OutOptionDefs.Add(D);
+	}
+}
+
+void ATheHousePlayerController::GatherNPCOrderActionsOnNPC_Implementation(
+	ATheHouseNPCCharacter* TargetNPC,
+	TArray<FTheHouseRTSContextMenuOptionDef>& OutOptionDefs)
+{
+	bool bAnyGuardSelected = false;
+	{
+		TArray<ATheHouseNPCCharacter*> Selected;
+		GetSelectedNPCsForRTSOrders(Selected);
+		for (ATheHouseNPCCharacter* N : Selected)
+		{
+			if (IsValid(N) && N->IsStaffGuardNPC())
+			{
+				bAnyGuardSelected = true;
+				break;
+			}
+		}
+	}
+
+	if (bAnyGuardSelected && IsValid(TargetNPC))
+	{
+		const ETheHouseNPCCategory TargetCat = ITheHouseNPCIdentity::Execute_GetNPCCategory(TargetNPC);
+		if (TargetCat == ETheHouseNPCCategory::Customer)
+		{
+			FTheHouseRTSContextMenuOptionDef Eject;
+			Eject.OptionId = FName(TEXT("GuardEjectCustomerFromZone"));
+			Eject.Label = FText::FromString(TEXT("Éjecter de la zone (client)"));
+			OutOptionDefs.Add(Eject);
+		}
+
+		bool bHasGuardIssuerNotTarget = false;
+		{
+			TArray<ATheHouseNPCCharacter*> Selected;
+			GetSelectedNPCsForRTSOrders(Selected);
+			for (ATheHouseNPCCharacter* N : Selected)
+			{
+				if (IsValid(N) && N->IsStaffGuardNPC() && N != TargetNPC)
+				{
+					bHasGuardIssuerNotTarget = true;
+					break;
+				}
+			}
+		}
+
+		if (bHasGuardIssuerNotTarget)
+		{
+			FTheHouseRTSContextMenuOptionDef Atk;
+			Atk.OptionId = FName(TEXT("GuardAttackNPC"));
+			Atk.Label = FText::FromString(TEXT("Attaquer (ordre garde)"));
+			OutOptionDefs.Add(Atk);
+		}
+	}
+
+	if (OutOptionDefs.Num() == 0)
+	{
+		FTheHouseRTSContextMenuOptionDef D;
+		D.OptionId = FName(TEXT("DebugOrder"));
+		D.Label = FText::FromString(TEXT("Debug order (override in BP)"));
+		OutOptionDefs.Add(D);
+	}
+}
+
+void ATheHousePlayerController::ExecuteNPCOrderOnObjectAction_Implementation(FName OptionId, ATheHouseObject* TargetObject)
+{
+#if !UE_BUILD_SHIPPING
+	UE_LOG(LogTemp, Log,
+		TEXT("[RTS|NPCOrder|Obj] Execute=%s Target=%s — surcharger ExecuteNPCOrderOnObjectAction en BP / C++ pour la logique."),
+		*OptionId.ToString(),
+		TargetObject ? *TargetObject->GetName() : TEXT("null"));
+#endif
+	(void)OptionId;
+	(void)TargetObject;
+	CloseRTSContextMenu();
+	RefreshRTSMainWidget();
+}
+
+void ATheHousePlayerController::ExecuteNPCOrderOnNPCAction_Implementation(FName OptionId, ATheHouseNPCCharacter* TargetNPC)
+{
+	UWorld* World = GetWorld();
+
+	if (OptionId == FName(TEXT("GuardEjectCustomerFromZone")))
+	{
+		if (IsValid(TargetNPC) && ITheHouseNPCIdentity::Execute_GetNPCCategory(TargetNPC) == ETheHouseNPCCategory::Customer
+			&& World)
+		{
+			if (ATheHouseNPCEjectRegionVolume* Zone = TheHouseNPCOrdersInternal::FindSmallestEjectVolumeContaining(
+					World,
+					TargetNPC->GetActorLocation()))
+			{
+				FVector ExitWorld;
+				if (Zone->TryComputeEjectionExitWorldLocation(TargetNPC->GetActorLocation(), ExitWorld))
+				{
+					TheHouseNPCOrdersInternal::ProjectPointToNavOrKeep(World, ExitWorld, ExitWorld);
+					if (AAIController* CustAI = Cast<AAIController>(TargetNPC->GetController()))
+					{
+						FAIMoveRequest Req;
+						Req.SetGoalLocation(ExitWorld);
+						Req.SetAcceptanceRadius(80.f);
+						Req.SetUsePathfinding(true);
+						Req.SetAllowPartialPath(true);
+						CustAI->MoveTo(Req);
+					}
+				}
+			}
+#if !UE_BUILD_SHIPPING
+			else
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("[RTS|Guard] Éjection : aucun TheHouseNPCEjectRegionVolume ne contient la position de %s."),
+					*TargetNPC->GetName());
+			}
+#endif
+		}
+	}
+	else if (OptionId == FName(TEXT("GuardAttackNPC")))
+	{
+		if (IsValid(TargetNPC))
+		{
+			TArray<ATheHouseNPCCharacter*> Selected;
+			GetSelectedNPCsForRTSOrders(Selected);
+			for (ATheHouseNPCCharacter* Guard : Selected)
+			{
+				if (!IsValid(Guard) || !Guard->IsStaffGuardNPC() || Guard == TargetNPC)
+				{
+					continue;
+				}
+				if (ATheHouseNPCAIController* GAI = Cast<ATheHouseNPCAIController>(Guard->GetController()))
+				{
+					GAI->IssueAttackOrderOnScriptedTarget(TargetNPC);
+				}
+			}
+		}
+	}
+#if !UE_BUILD_SHIPPING
+	else
+	{
+		UE_LOG(LogTemp, Log,
+			TEXT("[RTS|NPCOrder|NPC] Execute=%s Target=%s — surcharger ExecuteNPCOrderOnNPCAction en BP / C++ pour la logique."),
+			*OptionId.ToString(),
+			TargetNPC ? *TargetNPC->GetName() : TEXT("null"));
+	}
+#endif
+
+	CloseRTSContextMenu();
+	RefreshRTSMainWidget();
+}
+
+void ATheHousePlayerController::GatherNPCOrderActionsOnGround_Implementation(TArray<FTheHouseRTSContextMenuOptionDef>& OutOptionDefs)
+{
+	// Par défaut : un ordre MoveTo vers LastNPCOrderGroundTarget + une entrée debug.
+	FTheHouseRTSContextMenuOptionDef Move;
+	Move.OptionId = FName(TEXT("MoveTo"));
+	Move.Label = FText::FromString(TEXT("Se déplacer ici"));
+	OutOptionDefs.Add(Move);
+
+	if (OutOptionDefs.Num() == 1)
+	{
+		FTheHouseRTSContextMenuOptionDef D;
+		D.OptionId = FName(TEXT("DebugOrder"));
+		D.Label = FText::FromString(TEXT("Debug order (override in BP)"));
+		OutOptionDefs.Add(D);
+	}
+}
+
+void ATheHousePlayerController::ExecuteNPCOrderOnGroundAction_Implementation(FName OptionId)
+{
+	if (OptionId == FName(TEXT("MoveTo")))
+	{
+		IssueMoveOrdersToSelectedNPCsAtLocation(LastNPCOrderGroundTarget);
+	}
+#if !UE_BUILD_SHIPPING
+	else
+	{
+		UE_LOG(LogTemp, Log,
+			TEXT("[RTS|NPCOrder|Ground] Execute=%s Ground=%s — surcharger ExecuteNPCOrderOnGroundAction en BP / C++."),
+			*OptionId.ToString(),
+			*LastNPCOrderGroundTarget.ToString());
+	}
+#endif
+
+	CloseRTSContextMenu();
+	RefreshRTSMainWidget();
 }

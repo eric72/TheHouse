@@ -5,6 +5,7 @@
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Components/TextBlock.h"
+#include "Internationalization/Text.h"
 
 void UTheHouseFPSHudWidget::NativeConstruct()
 {
@@ -36,7 +37,7 @@ void UTheHouseFPSHudWidget::RebuildRootIfNeeded()
 	Panel->SetBrush(Brush);
 
 	UTextBlock* T = Tree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
-	T->SetText(FText::FromString(TEXT("Mode FPS — F : retour RTS")));
+	T->SetText(NSLOCTEXT("TheHouse", "FPS_HudHint", "Mode FPS — F : retour RTS"));
 	T->SetColorAndOpacity(FSlateColor(FLinearColor::White));
 	Panel->SetContent(T);
 

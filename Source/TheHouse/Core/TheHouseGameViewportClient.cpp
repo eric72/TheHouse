@@ -76,3 +76,20 @@ bool UTheHouseGameViewportClient::InputAxis(const FInputKeyEventArgs& EventArgs)
 
 	return Super::InputAxis(EventArgs);
 }
+
+bool UTheHouseGameViewportClient::InputKey(const FInputKeyEventArgs& EventArgs)
+{
+	if (EventArgs.Key == EKeys::Escape && EventArgs.Event == IE_Pressed)
+	{
+		if (ATheHousePlayerController* THPC =
+				TheHouseViewportInput::ResolveTheHousePC(this, EventArgs.InputDevice))
+		{
+			if (THPC->TryConsumeEscapeForRtsUi())
+			{
+				return true;
+			}
+		}
+	}
+
+	return Super::InputKey(EventArgs);
+}
