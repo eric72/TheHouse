@@ -2,6 +2,10 @@
 
 Vue d’ensemble du dossier **`Docs/`** : une arborescence par **fonctionnalité**, plus un **journal des mises à jour**.
 
+## Documentation site web
+
+Une **version site web** de la documentation (pages HTML, navigation latérale, sélecteur de langue FR/EN) vit dans **`site/`** : voir [site/index.html](site/index.html) ou, pour un serveur local avec rechargement, `npm install` puis `npm run dev` depuis **`Docs/site/`** (Vite). Le contenu reprend la structure des guides développeur et des pages d’aperçu.
+
 ---
 
 ## Guide développeur (code C++)
@@ -11,7 +15,7 @@ Vue d’ensemble du dossier **`Docs/`** : une arborescence par **fonctionnalité
 | **Index** | [Developer/README.md](Developer/README.md) |
 | **Français (Markdown)** | [Developer/GUIDE_FR.md](Developer/GUIDE_FR.md) |
 | **English (Markdown)** | [Developer/GUIDE_EN.md](Developer/GUIDE_EN.md) |
-| **Site web statique** | Dans [`site/`](site/) : `npm install` puis `npm run dev` (Vite, port 5173). Sinon ouvrir [`site/index.html`](site/index.html) directement. |
+| **Documentation site web** | Dans [`site/`](site/) : `npm install` puis `npm run dev` (Vite, port 5173). Sinon ouvrir [`site/index.html`](site/index.html) dans le navigateur. |
 
 ---
 

@@ -1,8 +1,10 @@
 # TheHouse
 
-Projet **Unreal Engine 5.7** (module C++ `TheHouse`). Ce fichier décrit la **prise en main** après clone du dépôt : prérequis, ouverture du projet, et configuration **Cursor / Visual Studio Code** pour l’IntelliSense C++.
+Projet **Unreal Engine 5.7** (module C++ `TheHouse`). Titre de travail côté design : **The House**. Autres idées de noms notées pour le projet : **Sum Zero**, **Zero Sum**.
 
-Pour l’architecture du jeu, les systèmes (PNJ, objets plaçables, etc.) et la doc détaillée : **[Docs/Developer/README.md](Docs/Developer/README.md)** (liens vers les guides FR/EN).
+Ce fichier décrit la **prise en main** après clone du dépôt : prérequis, ouverture du projet, et configuration **Cursor / Visual Studio Code** pour l’IntelliSense C++.
+
+Pour l’architecture du jeu, les systèmes (PNJ, objets plaçables, etc.) et la doc détaillée : **[Docs/Developer/README.md](Docs/Developer/README.md)** (guides FR/EN en Markdown) et le **site de documentation** dans **[Docs/site/](Docs/site/)** (voir section 4).
 
 ---
 
@@ -88,19 +90,24 @@ Relancez la tâche ou le script après des changements structurels : nouveau dos
 
 ---
 
-## 4. Documentation développeur
+## 4. Documentation (Markdown + site web)
+
+En plus des **guides longs** en `.md`, le dépôt inclut une **documentation site web** statique (HTML/CSS, navigation, FR/EN) dans **`Docs/site/`**.
 
 | Ressource | Contenu |
 |-----------|---------|
-| [Docs/Developer/README.md](Docs/Developer/README.md) | Index des guides (FR/EN), site doc statique |
+| [Docs/README.md](Docs/README.md) | Index de tout le dossier `Docs/` (features, changelog, lien vers le site) |
+| [Docs/Developer/README.md](Docs/Developer/README.md) | Index développeur (FR/EN) + lien vers le site |
 | [Docs/Developer/GUIDE_FR.md](Docs/Developer/GUIDE_FR.md) | Guide long (architecture, localisation, pièges) |
 | [Docs/Developer/GUIDE_EN.md](Docs/Developer/GUIDE_EN.md) | Same in English |
+| **Site web** | [Docs/site/](Docs/site/) : `npm install` puis `npm run dev` dans `Docs/site/` (Vite, port 5173), ou ouvrir [Docs/site/index.html](Docs/site/index.html) dans le navigateur |
 
 ---
 
 ## English (short)
 
+- **Working title ideas:** **The House** (current direction), also **Sum Zero**, **Zero Sum**.
 - **Engine:** UE **5.7** (see `EngineAssociation` in `TheHouse.uproject`). Install via Epic Launcher; optional env vars **`UE_ENGINE_ROOT`** or **`UNREAL_ENGINE_ROOT`** if the engine is not under `Program Files\Epic Games\UE_5.7`.
 - **C++ workload:** MSVC + Windows SDK (standard Unreal Windows setup).
 - **Cursor / VS Code:** After clone, run task **`UE: Refresh VS Code / Cursor IntelliSense`** or `Scripts\RefreshVSCodeIntellisense.ps1`, then **C/C++: Reset IntelliSense Database** and **Developer: Reload Window**.
-- **More docs:** [Docs/Developer/README.md](Docs/Developer/README.md).
+- **Docs:** Markdown guides under [Docs/Developer/](Docs/Developer/) and a **static doc website** under [Docs/site/](Docs/site/) (`npm run dev` in `Docs/site/` or open `index.html`).
