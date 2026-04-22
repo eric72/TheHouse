@@ -2,7 +2,9 @@
 
 Mur « intelligent » pour la caméra RTS : tag `SeeThroughWall`, réduction de hauteur façon Sims, paramètres matériau (`CameraFade`, `WallHalfHeight`), et option de remplissage de coupe (expérimental).
 
-**Code source :** `Source/TheHouse/Player/TheHouseSmartWall.h` / `.cpp`
+**Code source :** `Source/TheHouse/Player/TheHouseSmartWall.h` / `.cpp` · natif BP : `BP_SmartWall`
+
+Retour : [Features — index](../README.md) · [Documentation TheHouse](../../README.md)
 
 ---
 

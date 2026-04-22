@@ -57,7 +57,7 @@
 
       <h2 id="vision">Game vision</h2>
       <p>Casino management / <strong>RTS</strong> (top-down camera, placement). <strong>FPS</strong> as a secondary activity — FPS does <strong>not</strong> run casino management. See <code>Docs/PROJECT_OVERVIEW.md</code> and <code>Docs/SYSTEMS.md</code>.</p>
-      <p>C++ focus: RTS camera, FPS switch, placement, selection, NPC slots on objects, <strong>NPC foundation</strong> (archetypes, category registry), camera occlusion, walls.</p>
+      <p>C++ focus: RTS camera, FPS switch, placement, selection, <strong>RTS UMG</strong> (main panel, context menus, NPC orders), NPC slots on objects, <strong>NPC foundation</strong> (archetypes, category registry, eject volume), <strong>localization</strong> (subsystem + CLI), camera occlusion, walls.</p>
 
       <h2 id="archi">High-level architecture</h2>
       <pre class="ascii" aria-label="Architecture diagram">ATheHouseGameModeBase
@@ -88,6 +88,10 @@ ATheHouseNPCCharacter + ATheHouseNPCAIController → NPCs (not the PlayerControl
           <tr><td><code>NPC/TheHouseNPCCharacter.*</code></td><td><code>ATheHouseNPCCharacter</code> — <code>Wallet</code>, archetype.</td></tr>
           <tr><td><code>NPC/TheHouseNPCAIController.*</code></td><td><code>ATheHouseNPCAIController</code> — BT / perception (extend).</td></tr>
           <tr><td><code>NPC/TheHouseNPCSubsystem.*</code></td><td><code>UTheHouseNPCSubsystem</code> — list by category.</td></tr>
+          <tr><td><code>NPC/TheHouseNPCEjectRegionVolume.*</code></td><td>Box volume for customer <strong>eject</strong> orders from a region.</td></tr>
+          <tr><td><code>Localization/</code></td><td><code>UTheHouseLocalizationSubsystem</code>, language <code>USaveGame</code>.</td></tr>
+          <tr><td><code>UI/</code></td><td>RTS main widget, object/NPC/order context menus, placed-object settings, click relay, FPS HUD widgets.</td></tr>
+          <tr><td><code>Player/TheHouseSmartWall.*</code></td><td>Smart wall actor (see Features doc).</td></tr>
         </tbody>
       </table>
 
@@ -153,6 +157,13 @@ ATheHouseNPCCharacter + ATheHouseNPCAIController → NPCs (not the PlayerControl
         <li><code>Input_SelectPressed</code> / <code>Input_SelectReleased</code> handle normal RTS left click; <code>Input_SelectDoubleClick</code> binds a real <strong>LMB double-click</strong> so the panel can reopen even if the second click is swallowed by UMG.</li>
         <li><code>TheHouse_IsCursorOverBlockingRTSViewportUI</code> filters only UMG that should truly block world input. Fullscreen decorative containers should stay <code>SelfHitTestInvisible</code> / <code>HitTestInvisible</code>, not <code>Visible</code>.</li>
         <li><strong>Blueprint values to set in <code>BP_HouseController</code>:</strong> <code>PlacedObjectSettingsWidgetClass</code>, <code>RTS Main Widget Class</code>, <code>RTS Context Menu Widget Class</code>.</li>
+      </ul>
+      <h3>NPC context menus &amp; orders</h3>
+      <ul>
+        <li><strong>Left click</strong> selects (NPCs / <code>ITheHouseSelectable</code> objects).</li>
+        <li><strong>Right click</strong> opens a menu depending on context (placed object, NPC “inspect”, or <strong>orders</strong> when at least one NPC is selected).</li>
+        <li><strong>PC Blueprint properties:</strong> <code>NPCRTSContextMenuWidgetClass</code>, <code>NPCOrderContextMenuWidgetClass</code> (plus object context menu class).</li>
+        <li><strong>Dynamic actions:</strong> override <code>GatherNPCOrderActionsOnGround</code> / <code>ExecuteNPCOrderOnGroundAction</code> (or object/NPC variants) on a PlayerController subclass — see <a href="../../Developer/GUIDE_EN.md#rts-ui-main-panel-vs-context-menu">GUIDE_EN.md → RTS UI</a>.</li>
       </ul>
       <h3>RTS ↔ FPS</h3>
       <ul>
@@ -232,14 +243,20 @@ ATheHouseNPCCharacter + ATheHouseNPCAIController → NPCs (not the PlayerControl
       <h2 id="localization">Localization (full pipeline)</h2>
       <p>Create the <strong>Game</strong> target once in the <strong>Localization Dashboard</strong> (<code>Config/Localization/Game_*.ini</code>). Use <strong><code>Scripts/RunLocalizationStep.ps1</code></strong> with <code>-Step …</code> so <code>UnrealEditor-Cmd</code> runs <code>-LiveCoding=false</code> (avoids hangs when the editor is open). Full workflows (PO, dialogue CSV, import WAVs, Wwise note): <a href="../../Developer/GUIDE_EN.md#localization-full-command-line-pipeline">GUIDE_EN.md → Localization</a>.</p>
       <p><strong>Master command</strong> (replace <code>&lt;Step&gt;</code> with <code>Gather</code>, <code>Compile</code>, <code>Export</code>, <code>Import</code>, <code>ExportDialogueScript</code>, <code>ImportDialogueScript</code>, <code>ImportDialogue</code>, <code>Reports</code>, or <code>RepairGatherIni</code>):</p>
-      <pre class="cmd"><code>powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Eric\Documents\Unreal Projects\TheHouse\Scripts\RunLocalizationStep.ps1" -Step &lt;Step&gt;</code></pre>
+      <pre class="cmd"><code>powershell -NoProfile -ExecutionPolicy Bypass -File "Scripts\RunLocalizationStep.ps1" -Step &lt;Step&gt;</code></pre>
+      <p class="hint">Run from the <strong>project root</strong> (folder that contains <code>TheHouse.uproject</code> and <code>Scripts/</code>).</p>
       <p><strong>Shortcuts:</strong> <code>GatherLocalization.ps1</code> / <code>CompileLocalization.ps1</code>. Typical text loop: Gather → Compile. VO: ExportDialogueScript → … → ImportDialogue (configure <code>Game_ImportDialogue.ini</code> paths) → Compile. Wwise remains a separate audio pipeline.</p>
 
       <h2 id="refs">References</h2>
       <ul>
         <li><code>Docs/README.md</code> — Features / Changelog index</li>
+        <li><code>Docs/Features/README.md</code> — feature index (RTS UI, localization, NPC world, …)</li>
         <li><code>Docs/Features/CasinoPlaceableObjects/README.md</code></li>
         <li><code>Docs/Features/SmartWall/README.md</code></li>
+        <li><code>Docs/Features/RTS_UI/README.md</code></li>
+        <li><code>Docs/Features/Localization/README.md</code></li>
+        <li><code>Docs/Features/NPCWorld/README.md</code></li>
+        <li><code>Docs/PROJECT_OVERVIEW.md</code> · <code>Docs/SYSTEMS.md</code></li>
         <li><code>Docs/Changelog/CHANGELOG.md</code></li>
       </ul>
     </main>

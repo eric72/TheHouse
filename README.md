@@ -97,6 +97,7 @@ En plus des **guides longs** en `.md`, le dépôt inclut une **documentation sit
 | Ressource | Contenu |
 |-----------|---------|
 | [Docs/README.md](Docs/README.md) | Index de tout le dossier `Docs/` (features, changelog, lien vers le site) |
+| [Docs/Features/README.md](Docs/Features/README.md) | Index des features (casino, SmartWall, RTS UI, localisation, PNJ monde) |
 | [Docs/Developer/README.md](Docs/Developer/README.md) | Index développeur (FR/EN) + lien vers le site |
 | [Docs/Developer/GUIDE_FR.md](Docs/Developer/GUIDE_FR.md) | Guide long (architecture, localisation, pièges) |
 | [Docs/Developer/GUIDE_EN.md](Docs/Developer/GUIDE_EN.md) | Same in English |

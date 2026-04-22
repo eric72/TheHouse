@@ -57,7 +57,7 @@
 
       <h2 id="vision">Vision du jeu</h2>
       <p>Gestion de casino type tycoon / <strong>RTS</strong> (caméra aérienne, placement). <strong>FPS</strong> en activité secondaire (exploration, missions) — le FPS ne gère pas la mécanique de gestion du casino. Voir aussi <code>Docs/PROJECT_OVERVIEW.md</code> et <code>Docs/SYSTEMS.md</code>.</p>
-      <p>Le C++ couvre surtout : caméra RTS, bascule FPS, placement d’objets, sélection, slots PNJ sur les objets, <strong>socle PNJ</strong> (archetypes, registre par catégorie), occlusion caméra, murs.</p>
+      <p>Le C++ couvre surtout : caméra RTS, bascule FPS, placement d’objets, sélection, <strong>UI RTS</strong> (panneau, menus, ordres), slots PNJ sur les objets, <strong>socle PNJ</strong> (archetypes, registre, volume d’éjection), <strong>localisation</strong> (sous-système + scripts), occlusion caméra, murs.</p>
 
       <h2 id="archi">Architecture globale</h2>
       <pre class="ascii" aria-label="Schéma architecture">ATheHouseGameModeBase
@@ -88,12 +88,16 @@ ATheHouseNPCCharacter + ATheHouseNPCAIController → PNJ (pas le PlayerControlle
           <tr><td><code>NPC/TheHouseNPCCharacter.*</code></td><td><code>ATheHouseNPCCharacter</code> — <code>Wallet</code>, archetype.</td></tr>
           <tr><td><code>NPC/TheHouseNPCAIController.*</code></td><td><code>ATheHouseNPCAIController</code> — BT / perception (extension).</td></tr>
           <tr><td><code>NPC/TheHouseNPCSubsystem.*</code></td><td><code>UTheHouseNPCSubsystem</code> — liste par catégorie.</td></tr>
+          <tr><td><code>NPC/TheHouseNPCEjectRegionVolume.*</code></td><td>Volume boîte : zone pour ordres d’<strong>éjection</strong> client.</td></tr>
+          <tr><td><code>Localization/</code></td><td><code>UTheHouseLocalizationSubsystem</code>, SaveGame langue.</td></tr>
+          <tr><td><code>UI/</code></td><td>Widget RTS principal, menus contextuels (objet / PNJ / ordres), panneau paramètres, relais clics, HUD FPS.</td></tr>
+          <tr><td><code>Player/TheHouseSmartWall.*</code></td><td>Mur intelligent (voir doc Features).</td></tr>
         </tbody>
       </table>
 
       <h2 id="config">Configuration & point d’entrée</h2>
       <ul>
-        <li><code>TheHouse.uprojet</code> : Enhanced Input <strong>désactivé</strong> — mappings classiques dans <code>DefaultInput.ini</code>.</li>
+        <li><code>TheHouse.uproject</code> : Enhanced Input <strong>désactivé</strong> — mappings classiques dans <code>DefaultInput.ini</code>.</li>
         <li><code>DefaultEngine.ini</code> : <code>GameViewportClientClassName=/Script/TheHouse.TheHouseGameViewportClient</code> (molette).</li>
         <li>GameMode carte : souvent <code>BP_HouseGameMode</code> — le PlayerController doit rester compatible avec <code>ATheHousePlayerController</code>.</li>
       </ul>
@@ -240,14 +244,20 @@ ATheHouseNPCCharacter + ATheHouseNPCAIController → PNJ (pas le PlayerControlle
       <h2 id="localisation">Localisation (pipeline complet)</h2>
       <p>Créer une fois la cible <strong>Game</strong> dans le tableau de bord (<code>Config/Localization/Game_*.ini</code>). Utiliser <strong><code>Scripts/RunLocalizationStep.ps1</code></strong> avec <code>-Step …</code> pour lancer <code>UnrealEditor-Cmd</code> avec <code>-LiveCoding=false</code>. Workflows complets (PO, CSV dialogue, import WAV, Wwise) : <a href="../../Developer/GUIDE_FR.md#localisation-pipeline-complet-en-ligne-de-commande">GUIDE_FR.md → Localisation</a>.</p>
       <p><strong>Commande maître</strong> (remplacer <code>&lt;Etape&gt;</code> par <code>Gather</code>, <code>Compile</code>, <code>Export</code>, <code>Import</code>, <code>ExportDialogueScript</code>, <code>ImportDialogueScript</code>, <code>ImportDialogue</code>, <code>Reports</code>, ou <code>RepairGatherIni</code>) :</p>
-      <pre class="cmd"><code>powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Eric\Documents\Unreal Projects\TheHouse\Scripts\RunLocalizationStep.ps1" -Step &lt;Etape&gt;</code></pre>
+      <pre class="cmd"><code>powershell -NoProfile -ExecutionPolicy Bypass -File "Scripts\RunLocalizationStep.ps1" -Step &lt;Etape&gt;</code></pre>
+      <p class="hint">À lancer depuis la <strong>racine du projet</strong> (dossier contenant <code>TheHouse.uproject</code> et <code>Scripts/</code>).</p>
       <p><strong>Raccourcis :</strong> <code>GatherLocalization.ps1</code> / <code>CompileLocalization.ps1</code>. Texte : Gather → Compile. Voix Unreal : ExportDialogueScript → … → ImportDialogue (config <code>Game_ImportDialogue.ini</code>) → Compile. <strong>Wwise</strong> reste un pipeline audio à part.</p>
 
       <h2 id="refs">Références</h2>
       <ul>
         <li><code>Docs/README.md</code> — index Features / Changelog</li>
+        <li><code>Docs/Features/README.md</code> — index des features (RTS UI, localisation, PNJ monde, …)</li>
         <li><code>Docs/Features/CasinoPlaceableObjects/README.md</code></li>
         <li><code>Docs/Features/SmartWall/README.md</code></li>
+        <li><code>Docs/Features/RTS_UI/README.md</code></li>
+        <li><code>Docs/Features/Localization/README.md</code></li>
+        <li><code>Docs/Features/NPCWorld/README.md</code></li>
+        <li><code>Docs/PROJECT_OVERVIEW.md</code> · <code>Docs/SYSTEMS.md</code></li>
         <li><code>Docs/Changelog/CHANGELOG.md</code></li>
       </ul>
     </main>

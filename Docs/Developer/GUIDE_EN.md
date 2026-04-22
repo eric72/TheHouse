@@ -39,9 +39,9 @@ Design summary (see also `Docs/PROJECT_OVERVIEW.md` and `Docs/SYSTEMS.md`):
 
 - **Primary genre:** casino management / **RTS** (top-down camera, object placement).
 - **Secondary activity:** **FPS** (exploration, missions). FPS **does not** run casino management.
-- **Target systems:** RTS camera, grid placement, NPC staff, economy, object interaction.
+- **Target systems:** RTS camera, grid placement, NPC staff, economy, object interaction, RTS UMG, localization.
 
-Current C++ work focuses on **RTS camera**, **FPS switch**, **object placement**, **selection**, **NPC slots** on objects, an **NPC foundation** (categories, archetype Data Assets, world registry), and helpers (**camera occlusion**, walls, etc.).
+Current C++ work focuses on **RTS camera**, **FPS switch**, **object placement**, **selection**, **RTS UI** (main panel, object / NPC / order context menus, placed-object settings), **NPC slots** on objects, an **NPC foundation** (categories, archetype Data Assets, world registry, customer **eject** volume), **localization** (subsystem + SaveGame, CLI pipeline), and helpers (**camera occlusion**, walls, etc.).
 
 ---
 
@@ -89,6 +89,17 @@ Current C++ work focuses on **RTS camera**, **FPS switch**, **object placement**
 | `Source/TheHouse/NPC/TheHouseNPCAIController.*` | **`ATheHouseNPCAIController`** — hook for BT / perception (extend as needed). |
 | `Source/TheHouse/NPC/TheHouseNPCSubsystem.*` | **`UTheHouseNPCSubsystem`** — category registry in the world (`GetNPCsByCategory`). |
 | `Source/TheHouse/NPC/TheHouseNPC.h` | Optional umbrella include for the NPC module. |
+| `Source/TheHouse/NPC/TheHouseNPCEjectRegionVolume.*` | Box volume: region from which a **customer eject** order can be issued; exit point along dominant face (`TryComputeEjectionExitWorldLocation`). |
+| `Source/TheHouse/Localization/TheHouseLocalizationSubsystem.*` | Active culture, applies to text widgets. |
+| `Source/TheHouse/Localization/TheHouseLanguageSaveGame.*` | Persists language choice (`USaveGame`). |
+| `Source/TheHouse/UI/TheHouseRTSMainWidget.*` | Main RTS panel (money, catalog, stock) — `BindWidgetOptional` on `MoneyText`, `CatalogScroll`, `StoredScroll`. |
+| `Source/TheHouse/UI/TheHouseRTSContextMenuUMGWidget.*` / `TheHouseRTSContextMenuWidget.*` | **Placed object** context menu (UMG or pure Slate). |
+| `Source/TheHouse/UI/TheHouseNPCRTSContextMenuUMGWidget.*` | **NPC** context menu (no prior selection). |
+| `Source/TheHouse/UI/TheHouseNPCOrderContextMenuUMGWidget.*` | **NPC orders** menu (ground / object / NPC) when NPCs are selected. |
+| `Source/TheHouse/UI/TheHousePlacedObjectSettingsWidget.*` | Settings panel for a placed `ATheHouseObject`. |
+| `Source/TheHouse/UI/TheHouseFPSHudWidget.*` | FPS-side UMG HUD (when wired). |
+| `Source/TheHouse/UI/TheHouseRTSUIClickRelay.*` | Forwards catalog / stock clicks to the Player Controller. |
+| `Source/TheHouse/Player/BP_SmartWall.*` | **Blueprint native** class for the smart wall (see `Docs/Features/SmartWall/`). |
 
 **Blueprints:** the map’s default game mode is often `BP_HouseGameMode` (`Config/DefaultEngine.ini`). It **must** inherit from or use the project’s C++ classes so input fixes and the custom PC apply.
 
@@ -231,6 +242,87 @@ Files: `TheHousePlayerController.h/.cpp`
 **`None` on `RTS Main Widget Class`:** at runtime, if the property is empty, `InitializeModeWidgets()` assigns the default C++ class `UTheHouseRTSMainWidget`.
 
 **Hit-testing vs selection:** a fullscreen root **Canvas / Border** set to **`Visible`** still counts as “over UI” (blocks world). For decorative fullscreen chrome, prefer **`SelfHitTestInvisible`** (or **`HitTestInvisible`**); keep **`Visible`** for real controls (buttons, lists, text).
+
+### NPC menus and orders (left click = select, right click = menu / order)
+
+Three distinct RTS menus exist:
+
+| Case | UI class (WBP parent) | Property on the Player Controller Blueprint |
+|------|------------------------|-----------------------------------------------|
+| **NPC “inspect / use…” menu** (right-click on an NPC **with no** NPC selected) | `UTheHouseNPCRTSContextMenuUMGWidget` | `NPCRTSContextMenuWidgetClass` |
+| **NPC order menu (object / NPC / ground target)** (right-click **with at least one NPC selected** via left click) | `UTheHouseNPCOrderContextMenuUMGWidget` | `NPCOrderContextMenuWidgetClass` |
+| **Placed object menu** (right-click on an `ATheHouseObject` with no NPC selected) | `UTheHouseRTSContextMenuUMGWidget` | `RTSContextMenuWidgetClass` |
+
+Optional UMG widgets (`BindWidgetOptional`) in menu WBPs:
+
+- `MenuBorder` (`UBorder`)
+- `OptionsBox` (`UVerticalBox`)
+
+### Adding order actions (C++ example)
+
+Actions are **dynamic**: you add them when the menu opens via BlueprintNativeEvent hooks.
+
+- `GatherNPCOrderActionsOnGround(OutOptionDefs)` — orders on the ground (clicked point).
+- `ExecuteNPCOrderOnGroundAction(OptionId)` — runs the option for selected NPCs. The point is available via `GetLastNPCOrderGroundTarget()`.
+
+Example (in a C++ subclass of `ATheHousePlayerController`):
+
+```cpp
+namespace TheHouseNPCOrderIds
+{
+	static const FName MoveTo(TEXT("MoveTo"));
+	static const FName RunTo(TEXT("RunTo"));
+	static const FName DebugShout(TEXT("DebugShout"));
+}
+
+void AMyHousePlayerController::GatherNPCOrderActionsOnGround_Implementation(
+	TArray<FTheHouseRTSContextMenuOptionDef>& OutOptionDefs)
+{
+	using namespace TheHouseNPCOrderIds;
+
+	OutOptionDefs.Reset();
+	OutOptionDefs.Add({ MoveTo, FText::FromString(TEXT("Move here")) });
+	OutOptionDefs.Add({ RunTo,  FText::FromString(TEXT("Run here")) });
+	OutOptionDefs.Add({ DebugShout, FText::FromString(TEXT("Shout (debug)")) });
+}
+
+void AMyHousePlayerController::ExecuteNPCOrderOnGroundAction_Implementation(FName OptionId)
+{
+	using namespace TheHouseNPCOrderIds;
+
+	TArray<ATheHouseNPCCharacter*> NPCs;
+	GetSelectedNPCsForRTSOrders(NPCs);
+
+	const FVector Goal = GetLastNPCOrderGroundTarget();
+
+	if (OptionId == MoveTo || OptionId == RunTo)
+	{
+		for (ATheHouseNPCCharacter* Npc : NPCs)
+		{
+			if (!IsValid(Npc)) continue;
+			if (AAIController* AI = Cast<AAIController>(Npc->GetController()))
+			{
+				FAIMoveRequest Req;
+				Req.SetGoalLocation(Goal);
+				Req.SetAcceptanceRadius(52.f);
+				Req.SetUsePathfinding(true);
+				Req.SetAllowPartialPath(true);
+				AI->MoveTo(Req);
+			}
+		}
+	}
+	else if (OptionId == DebugShout)
+	{
+		for (ATheHouseNPCCharacter* Npc : NPCs)
+		{
+			if (IsValid(Npc))
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[Order] %s shout!"), *Npc->GetName());
+			}
+		}
+	}
+}
+```
 
 ---
 
@@ -435,10 +527,14 @@ The PlayerController also logs useful **BeginPlay** info (`PlayerInput` class, E
 | Document | Content |
 |----------|---------|
 | `Docs/README.md` | Index of Features / Changelog. |
-| `Docs/PROJECT_OVERVIEW.md` | Short product vision. |
-| `Docs/SYSTEMS.md` | Game systems list. |
+| `Docs/Features/README.md` | Feature folder index (`Source/` coverage). |
+| `Docs/PROJECT_OVERVIEW.md` | Short product vision + working titles. |
+| `Docs/SYSTEMS.md` | Systems list aligned with code. |
 | `Docs/Features/CasinoPlaceableObjects/README.md` | Placeable objects, BP workflow. |
 | `Docs/Features/SmartWall/README.md` | Smart wall. |
+| `Docs/Features/RTS_UI/README.md` | RTS panel, context menus, NPC orders. |
+| `Docs/Features/Localization/README.md` | Runtime + CLI pipeline. |
+| `Docs/Features/NPCWorld/README.md` | Subsystem, archetypes, eject, slot AI. |
 | `Docs/Changelog/CHANGELOG.md` | Version history. |
 
 ---
@@ -451,10 +547,12 @@ The **Localization Dashboard** is still required to **create the “Game” targ
 
 ### Master script: `RunLocalizationStep.ps1`
 
-Replace the project path if yours differs. Default engine: `C:\Program Files\Epic Games\UE_5.7`.
+Scripts default to a typical Epic **`UE_5.7`** install unless you pass **`-EngineRoot`**.
+
+Run from the **repository root** (folder that contains `TheHouse.uproject` and the `Scripts/` directory).
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Eric\Documents\Unreal Projects\TheHouse\Scripts\RunLocalizationStep.ps1" -Step <StepName>
+powershell -NoProfile -ExecutionPolicy Bypass -File "Scripts\RunLocalizationStep.ps1" -Step <StepName>
 ```
 
 Optional engine root: append `-EngineRoot "D:\UE\UE_5.7"`.
@@ -499,8 +597,10 @@ After manifest exists: `ExportDialogueScript` → edit **`GameDialogue.csv`** / 
 Same pattern; only **`-config=`** changes:
 
 ```text
-"C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "C:\Users\Eric\Documents\Unreal Projects\TheHouse\TheHouse.uproject" -run=GatherText "-config=Config/Localization/Game_<StepIni>.ini" -unattended -nop4 -nosplash -NullRHI -LiveCoding=false -log
+"<UE_5.7>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "<Project>\TheHouse.uproject" -run=GatherText "-config=Config/Localization/Game_<StepIni>.ini" -unattended -nop4 -nosplash -NullRHI -LiveCoding=false -log
 ```
+
+Replace `<UE_5.7>` with your engine root (folder that contains `Engine\`) and `<Project>` with your TheHouse repo root.
 
 | Flag | Purpose |
 |------|---------|
@@ -516,21 +616,21 @@ Same pattern; only **`-config=`** changes:
 ### Copy-paste shortcuts
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Eric\Documents\Unreal Projects\TheHouse\Scripts\GatherLocalization.ps1"
-powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Eric\Documents\Unreal Projects\TheHouse\Scripts\CompileLocalization.ps1"
-powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Eric\Documents\Unreal Projects\TheHouse\Scripts\GatherLocalization.ps1" -RepairOnly
+powershell -NoProfile -ExecutionPolicy Bypass -File "Scripts\GatherLocalization.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "Scripts\CompileLocalization.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "Scripts\GatherLocalization.ps1" -RepairOnly
 ```
 
 Example **export PO** after Gather:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Eric\Documents\Unreal Projects\TheHouse\Scripts\RunLocalizationStep.ps1" -Step Export
+powershell -NoProfile -ExecutionPolicy Bypass -File "Scripts\RunLocalizationStep.ps1" -Step Export
 ```
 
 ---
 
 ## Web version
 
-An **HTML** version (navigation + styling) lives under **`Docs/site/`**: open `index.html` in a browser (a local static file server is ideal if the browser blocks some relative paths).
+An **HTML** site (navigation + FR/EN pages) lives under **`Docs/site/`**: run `npm run dev` inside `Docs/site/`, or open `Docs/site/index.html`. It mirrors this guide’s structure and links to `Docs/Features/`.
 
-*Last updated: aligned with the `TheHouse` module codebase (UE 5.7).*
+*Last updated: aligned with the `TheHouse` module (UE 5.7) — includes RTS UI, runtime localization, NPC eject volume.*

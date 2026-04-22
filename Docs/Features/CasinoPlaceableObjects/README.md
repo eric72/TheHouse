@@ -2,7 +2,8 @@
 
 Documentation de reprise rapide pour le système d’objets décor / gameplay (tables, machines, billard, etc.) basé sur **`ATheHouseObject`**.
 
-> Retour : [Documentation TheHouse](../../README.md)
+> Retour : [Features — index](../README.md) · [Documentation TheHouse](../../README.md)  
+> PNJ hors objet (subsystem, éjection) : [NPCWorld](../NPCWorld/README.md)
 
 ---
 

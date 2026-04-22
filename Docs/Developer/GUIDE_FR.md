@@ -39,9 +39,9 @@ Résumé design (voir aussi `Docs/PROJECT_OVERVIEW.md` et `Docs/SYSTEMS.md`) :
 
 - **Genre principal :** gestion de casino type tycoon / **RTS** (caméra aérienne, placement d’objets).
 - **Activité secondaire :** **FPS** (exploration, missions) — le FPS **ne gère pas** la mécanique de gestion du casino.
-- **Systèmes visés :** caméra RTS, placement sur grille, employés PNJ, économie, interaction avec les objets.
+- **Systèmes visés :** caméra RTS, placement sur grille, employés PNJ, économie, interaction avec les objets, **UI RTS (UMG)**, **localisation** (texte + pipeline).
 
-Le code C++ actuel couvre surtout **caméra RTS**, **bascule FPS**, **placement d’objets**, **sélection**, **slots PNJ** sur les objets, un **socle PNJ** (catégories, archetypes Data Asset, registre monde), et des **helpers** (occlusion caméra, murs, etc.).
+Le code C++ actuel couvre surtout **caméra RTS**, **bascule FPS**, **placement d’objets**, **sélection**, **UI RTS** (panneau principal, menus contextuels objets / PNJ / ordres, panneau paramètres), **slots PNJ** sur les objets, un **socle PNJ** (catégories, archetypes Data Asset, registre monde, volume d’éjection client), **localisation** (sous-système + SaveGame, pipeline CLI), et des **helpers** (occlusion caméra, murs, etc.).
 
 ---
 
@@ -89,6 +89,17 @@ Le code C++ actuel couvre surtout **caméra RTS**, **bascule FPS**, **placement 
 | `Source/TheHouse/NPC/TheHouseNPCAIController.*` | **`ATheHouseNPCAIController`** — point d’entrée BT / perception (à étendre). |
 | `Source/TheHouse/NPC/TheHouseNPCSubsystem.*` | **`UTheHouseNPCSubsystem`** — registre par catégorie dans le monde (`GetNPCsByCategory`). |
 | `Source/TheHouse/NPC/TheHouseNPC.h` | Include unique optionnel de tout le socle PNJ. |
+| `Source/TheHouse/NPC/TheHouseNPCEjectRegionVolume.*` | Volume boîte : zone d’où l’on peut ordonner l’**éjection** d’un client ; sortie le long de la face dominante (`TryComputeEjectionExitWorldLocation`). |
+| `Source/TheHouse/Localization/TheHouseLocalizationSubsystem.*` | Langue active, application aux widgets texte. |
+| `Source/TheHouse/Localization/TheHouseLanguageSaveGame.*` | Persistance du choix de langue (`USaveGame`). |
+| `Source/TheHouse/UI/TheHouseRTSMainWidget.*` | Panneau RTS principal (argent, catalogue, stock) — `BindWidgetOptional` sur `MoneyText`, `CatalogScroll`, `StoredScroll`. |
+| `Source/TheHouse/UI/TheHouseRTSContextMenuUMGWidget.*` / `TheHouseRTSContextMenuWidget.*` | Menu contextuel **objet** posé (Slate ou UMG). |
+| `Source/TheHouse/UI/TheHouseNPCRTSContextMenuUMGWidget.*` | Menu contextuel **PNJ** (sans sélection préalable). |
+| `Source/TheHouse/UI/TheHouseNPCOrderContextMenuUMGWidget.*` | Menu **ordres PNJ** (sol / objet / autre PNJ) quand des PNJ sont sélectionnés. |
+| `Source/TheHouse/UI/TheHousePlacedObjectSettingsWidget.*` | Panneau paramètres d’un `ATheHouseObject` posé. |
+| `Source/TheHouse/UI/TheHouseFPSHudWidget.*` | HUD UMG côté FPS (si branché). |
+| `Source/TheHouse/UI/TheHouseRTSUIClickRelay.*` | Relais de clics catalogue / stock vers le PlayerController. |
+| `Source/TheHouse/Player/BP_SmartWall.*` | Classe **Blueprint natif** liée au mur intelligent (voir `Docs/Features/SmartWall/`). |
 
 **Blueprints :** le GameMode par défaut de la carte est souvent `BP_HouseGameMode` (`Config/DefaultEngine.ini`). Il **doit** hériter ou utiliser les classes C++ du projet pour que les correctifs d’entrée et le PC personnalisé s’appliquent.
 
@@ -96,7 +107,7 @@ Le code C++ actuel couvre surtout **caméra RTS**, **bascule FPS**, **placement 
 
 ## Configuration & point d’entrée
 
-- **`TheHouse.uprojet`** : module `TheHouse`, plugin **Enhanced Input désactivé** — le projet s’appuie sur **anciennes Action/Axis mappings** (`DefaultInput.ini`) et sur des **contournements** (timer d’entrées, viewport) si le focus ou l’UI bloquent les touches.
+- **`TheHouse.uproject`** : module `TheHouse`, plugin **Enhanced Input désactivé** — le projet s’appuie sur **anciennes Action/Axis mappings** (`DefaultInput.ini`) et sur des **contournements** (timer d’entrées, viewport) si le focus ou l’UI bloquent les touches.
 - **`Config/DefaultEngine.ini`** :
   - `GameViewportClientClassName=/Script/TheHouse.TheHouseGameViewportClient` — nécessaire pour que la **molette** soit traitée avant les problèmes Game+UI.
   - `GlobalDefaultGameMode` : souvent un Blueprint ; vérifier que le **Player Controller Class** reste compatible avec `ATheHousePlayerController` (voir GameMode).
@@ -515,10 +526,14 @@ Le PlayerController log aussi des messages utiles au **BeginPlay** (classe `Play
 | Document | Contenu |
 |----------|---------|
 | `Docs/README.md` | Index de la documentation Features / Changelog. |
-| `Docs/PROJECT_OVERVIEW.md` | Vision produit courte. |
-| `Docs/SYSTEMS.md` | Liste des systèmes jeu. |
+| `Docs/Features/README.md` | Index des dossiers feature (couverture `Source/`). |
+| `Docs/PROJECT_OVERVIEW.md` | Vision produit courte + titres de travail. |
+| `Docs/SYSTEMS.md` | Liste des systèmes alignée sur le code. |
 | `Docs/Features/CasinoPlaceableObjects/README.md` | Objets plaçables, workflow BP. |
 | `Docs/Features/SmartWall/README.md` | Smart wall. |
+| `Docs/Features/RTS_UI/README.md` | Panneau RTS, menus contextuels, ordres PNJ. |
+| `Docs/Features/Localization/README.md` | Runtime + pipeline CLI. |
+| `Docs/Features/NPCWorld/README.md` | Subsystem, archetypes, éjection, IA slot. |
 | `Docs/Changelog/CHANGELOG.md` | Journal des versions. |
 
 ---
@@ -531,10 +546,12 @@ Le **tableau de bord de localisation** reste nécessaire pour **créer une fois 
 
 ### Script principal : `RunLocalizationStep.ps1`
 
-Adapter le chemin du projet. Moteur par défaut : `C:\Program Files\Epic Games\UE_5.7`.
+Moteur par défaut attendu par les scripts : installation Epic type `UE_5.7` (sinon `-EngineRoot`).
+
+À lancer depuis la **racine du dépôt** (dossier qui contient `TheHouse.uproject` et le dossier `Scripts/`).
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Eric\Documents\Unreal Projects\TheHouse\Scripts\RunLocalizationStep.ps1" -Step <NomEtape>
+powershell -NoProfile -ExecutionPolicy Bypass -File "Scripts\RunLocalizationStep.ps1" -Step <NomEtape>
 ```
 
 Option moteur : `-EngineRoot "D:\UE\UE_5.7"`.
@@ -578,8 +595,10 @@ Après manifeste : `ExportDialogueScript` → édition / enregistrement selon **
 Même modèle ; seul **`-config=`** change :
 
 ```text
-"C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "C:\Users\Eric\Documents\Unreal Projects\TheHouse\TheHouse.uproject" -run=GatherText "-config=Config/Localization/Game_<Ini>.ini" -unattended -nop4 -nosplash -NullRHI -LiveCoding=false -log
+"<UE_5.7>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "<Projet>\TheHouse.uproject" -run=GatherText "-config=Config/Localization/Game_<Ini>.ini" -unattended -nop4 -nosplash -NullRHI -LiveCoding=false -log
 ```
+
+Remplace `<UE_5.7>` par la racine du moteur (dossier contenant `Engine\`) et `<Projet>` par la racine du dépôt TheHouse.
 
 | Option | Rôle |
 |--------|------|
@@ -595,21 +614,21 @@ Même modèle ; seul **`-config=`** change :
 ### Copier-coller rapide
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Eric\Documents\Unreal Projects\TheHouse\Scripts\GatherLocalization.ps1"
-powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Eric\Documents\Unreal Projects\TheHouse\Scripts\CompileLocalization.ps1"
-powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Eric\Documents\Unreal Projects\TheHouse\Scripts\GatherLocalization.ps1" -RepairOnly
+powershell -NoProfile -ExecutionPolicy Bypass -File "Scripts\GatherLocalization.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "Scripts\CompileLocalization.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "Scripts\GatherLocalization.ps1" -RepairOnly
 ```
 
 Exemple **export PO** après Gather :
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Eric\Documents\Unreal Projects\TheHouse\Scripts\RunLocalizationStep.ps1" -Step Export
+powershell -NoProfile -ExecutionPolicy Bypass -File "Scripts\RunLocalizationStep.ps1" -Step Export
 ```
 
 ---
 
 ## Site web (documentation)
 
-Une version **HTML** (navigation + thème) est disponible dans **`Docs/site/`** : ouvrir `index.html` dans un navigateur (idéalement via un serveur statique local si les navigateurs bloquent les chemins relatifs stricts).
+Une version **HTML** (navigation + thème + pages FR/EN) est disponible dans **`Docs/site/`** : `npm run dev` dans `Docs/site/`, ou ouvrir `Docs/site/index.html` dans un navigateur. Elle reprend l’architecture du guide et les liens vers les features (`Docs/Features/`).
 
-*Dernière mise à jour : alignée sur le code du module `TheHouse` (UE 5.7).*
+*Dernière mise à jour : alignée sur le code du module `TheHouse` (UE 5.7) — inclut UI RTS, localisation runtime, volume d’éjection PNJ.*

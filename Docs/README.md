@@ -21,14 +21,15 @@ Une **version site web** de la documentation (pages HTML, navigation latérale, 
 
 ## Fonctionnalités (`Features/`)
 
-Chaque sous-dossier décrit une feature (code, BP, workflow). Ouvre le **`README.md`** du dossier concerné.
+Chaque sous-dossier décrit une feature (code, BP, workflow). L’**[index Features](Features/README.md)** liste tout et indique quelles parties du `Source/` vont où.
 
 | Dossier | Sujet |
 |---------|--------|
-| [Features/CasinoPlaceableObjects](Features/CasinoPlaceableObjects/README.md) | Objets casino, `ATheHouseObject`, zone d’exclusion, PNJ, placement |
-| [Features/SmartWall](Features/SmartWall/README.md) | `ATheHouseSmartWall`, occlusion, hauteur minimale, matériau, Fill Cap |
-
-*Ajoute un dossier par nouvelle grosse feature (ex. `Features/RTSCamera`).*
+| [Features/CasinoPlaceableObjects](Features/CasinoPlaceableObjects/README.md) | Objets casino, `ATheHouseObject`, zone d’exclusion, slots, placement |
+| [Features/SmartWall](Features/SmartWall/README.md) | `ATheHouseSmartWall`, occlusion, matériau, Fill Cap |
+| [Features/RTS_UI](Features/RTS_UI/README.md) | Panneau RTS, menus contextuels, ordres PNJ, paramètres objet |
+| [Features/Localization](Features/Localization/README.md) | Sous-système langue, SaveGame, scripts `RunLocalizationStep.ps1` |
+| [Features/NPCWorld](Features/NPCWorld/README.md) | Subsystem, archetypes, volume d’éjection, IA slot |
 
 ---
 
@@ -45,11 +46,17 @@ Chaque sous-dossier décrit une feature (code, BP, workflow). Ouvre le **`README
 ```
 Docs/
 ├── README.md                 ← tu es ici
+├── PROJECT_OVERVIEW.md       ← vision courte + titres de travail
+├── SYSTEMS.md                ← systèmes (aligné code)
 ├── Developer/                ← guide C++ (FR/EN .md + README)
 ├── site/                     ← site statique (index.html, fr/, en/)
 ├── Features/
-│   └── <NomFeature>/
-│       └── README.md
+│   ├── README.md             ← index de toutes les features
+│   ├── CasinoPlaceableObjects/
+│   ├── SmartWall/
+│   ├── RTS_UI/
+│   ├── Localization/
+│   └── NPCWorld/
 └── Changelog/
     └── CHANGELOG.md
 ```

@@ -16,7 +16,7 @@ The **`.md`** files here are the full reference. The **web documentation** in **
 - **Moteur / Engine:** Unreal **5.7**, module C++ **`TheHouse`**
 - **Noms de projet (idées) / Project name ideas:** **The House** (titre de travail), **Sum Zero**, **Zero Sum**
 - **Vision / Vision:** RTS casino management + FPS secondaire (sans gestion casino en FPS)
-- **Fichiers clés / Key files:** `TheHousePlayerController`, `TheHouseObject`, `TheHouseGameModeBase`, `TheHouseGameViewportClient`, socle PNJ (`ATheHouseNPCCharacter`, `UTheHouseNPCSubsystem`, `UTheHouseNPCArchetype`)
+- **Fichiers clés / Key files:** `TheHousePlayerController`, `TheHouseObject`, `TheHouseGameModeBase`, `TheHouseGameViewportClient`, UI RTS (`TheHouseRTSMainWidget`, menus PNJ / ordres), socle PNJ (`ATheHouseNPCCharacter`, `UTheHouseNPCSubsystem`, `UTheHouseNPCArchetype`, `ATheHouseNPCEjectRegionVolume`), localisation (`TheHouseLocalizationSubsystem`)
 
 **Système PNJ / NPC system:** [GUIDE_FR § Système PNJ](GUIDE_FR.md#système-pnj-architecture) · [GUIDE_EN § NPC system](GUIDE_EN.md#npc-system-architecture)
 
