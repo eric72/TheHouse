@@ -1,0 +1,46 @@
+---
+description: "Save system: any persistent gameplay state must be saved/loaded"
+globs:
+  - "Source/TheHouse/**"
+  - "Content/**"
+alwaysApply: true
+---
+
+## Rule: persistence-first development
+
+When adding or changing a gameplay feature, always decide whether it creates **persistent state** (state that must survive: level change, game restart, Save/Load).
+
+If yes, update the save/load system in the same change.
+
+### What must be considered for Save/Load in this project
+
+- **Player economy**
+  - Money, debts, prices, payroll-related variables.
+  - Stock/inventory such as `StoredPlaceableStacks`.
+
+- **In‑game time / day-night**
+  - In-game clock state (seconds, day index) that drives `ATheHouseDayNightCycleActor`.
+
+- **Placed/buildable objects**
+  - Anything the player can place/move/remove at runtime (e.g. `ATheHouseObject` and future placeables).
+  - Save at least **class + transform**, plus any runtime-tuned settings exposed to the player (e.g. per-object economy parameters).
+
+- **NPC persistence**
+  - Persistent NPC identities (`PersistentId`), roles (staff/customer), employment data, building/location state (inside/outside + building id).
+  - **Pose monde**: `LastKnownTransform` + `LastLevelName` + `WorldSlot` (ville vs intérieur) pour respawn correct après `OpenLevel`.
+  - **Stats runtime** (wallet, salaire, étoiles, payroll flags, nom affiché) : tout ce qui n’est pas recréé par l’archetype seul.
+  - If NPCs can be unloaded, store enough data to respawn them consistently.
+
+- **Smart walls / décor runtime**
+  - `ATheHouseSmartWall` n’est **pas** sauvegardé tant qu’il reste du décor fixe dans le niveau.
+  - Si le joueur peut **poser/déplacer** des SmartWalls en runtime, ils doivent entrer dans le même pipeline que les objets plaçables (ex: `UTheHouseSaveGame` + spawn), ou devenir un `ATheHouseObject` dérivé.
+
+- **World transitions**
+  - Streaming vs OpenLevel: ensure state survives both. Prefer `UGameInstanceSubsystem` for cross-level persistence.
+
+### Implementation expectations
+
+- New persistent fields should be represented in `UTheHouseSaveGame` (global save) and/or dedicated save objects as needed.
+- `UTheHouseSaveSubsystem::SaveAll` / `LoadAll` must stay symmetric: whatever is saved must be restorable.
+- If something is *not* meant to be saved (purely visual/debug), document why.
+

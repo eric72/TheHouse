@@ -30,8 +30,14 @@ public class TheHouse : ModuleRules
 			"TheHouse/Object",
 			"TheHouse/AI",
 			"TheHouse/NPC",
+			"TheHouse/NPC/Spawning",
+			"TheHouse/NPC/Persistence",
 			"TheHouse/NPC/Archetypes",
-			"TheHouse/Localization"
+			"TheHouse/Localization",
+			"TheHouse/Animation",
+			"TheHouse/Combat",
+			"TheHouse/Environment"
+			,"TheHouse/Save"
 		});
 
 		// Uncomment if you are using Slate UI

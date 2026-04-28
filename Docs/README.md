@@ -6,6 +6,10 @@ Vue d’ensemble du dossier **`Docs/`** : une arborescence par **fonctionnalité
 
 Une **version site web** de la documentation (pages HTML, navigation latérale, sélecteur de langue FR/EN) vit dans **`site/`** : voir [site/index.html](site/index.html) ou, pour un serveur local avec rechargement, `npm install` puis `npm run dev` depuis **`Docs/site/`** (Vite). Le contenu reprend la structure des guides développeur et des pages d’aperçu.
 
+Notes :
+- **Scripts npm disponibles** : `dev`, `preview` (pas de `build` pour l’instant).
+- Les pages sont sous `Docs/site/fr/index.html` et `Docs/site/en/index.html`.
+
 ---
 
 ## Guide développeur (code C++)

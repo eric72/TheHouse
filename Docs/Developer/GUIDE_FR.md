@@ -195,6 +195,80 @@ Fichiers : `TheHousePlayerController.h/.cpp`
 5. **Grille** : `FTheHousePlacementGridSettings` (`CellSize`, `WorldOrigin`, `MinUpNormalZ`, `bEnableGridSnap`), cache **`OccupiedGridCells`**.
 6. **Sélection** : clic maintenu + HUD ; au relâchement, actors dans le rectangle implémentant **`ITheHouseSelectable`** reçoivent **`OnSelect`**.
 
+---
+
+### Recrutement staff (roster) + palette legacy
+
+Deux sources existent pour la liste **Personnel** dans le RTS Main Widget :
+
+- **Recrutement (roster)** : `NPCStaffRecruitmentPool` (règles) → `RefreshNPCStaffRecruitmentOffers()` → `NPCStaffRosterOffers` (liste affichée, prioritaire).
+- **Palette legacy** : `NPCStaffPalette` (statique) — utilisée seulement si le roster est vide.
+
+**Où configurer :** sur le Blueprint PlayerController (souvent `BP_HouseController`) → **Class Defaults**.
+
+#### Propriétés (regroupées) — `TheHouse|UI|RTS|NPC|Recruitment`
+
+- `NPC Staff Recruitment Pool` (tableau de slots)
+  - `Offers Per Refresh` : nombre d’offres générées par slot
+  - `StarRating Min/Max`, `Salary Multiplier Min/Max`, `Hire Cost Salary Months`
+  - Noms : `Random Display Names` **ou** `Random Given Names` + `Random Family Names`
+  - Catégories UI : `Staff Category Id`, `Staff Category Label`
+- `NPC Staff Roster Offers` (readonly) : candidates actuellement affichés
+- Auto-refresh (optionnel)
+  - `Auto Refresh NPC Staff Recruitment Roster`
+  - `NPC Staff Recruitment Auto Refresh Interval Seconds`
+
+#### Consommation des offres
+
+Quand une embauche est confirmée depuis une ligne du roster, l’offre est retirée de `NPCStaffRosterOffers`. Si la liste devient vide et que le pool n’est pas vide, le roster est regénéré.
+
+#### Setup recommandé (exemple “tycoon”)
+
+Dans `BP_HouseController` (Class Defaults) :
+
+- `NPC Staff Recruitment Pool` :
+  - 1 slot **GUARD** avec `Offers Per Refresh = 12`
+  - `StarRating Min/Max = 1 → 5`
+  - `Salary Multiplier Min/Max = 0.85 → 1.15`
+  - `Hire Cost Salary Months = 3`
+  - Pour des candidats “uniques” : laisse `Random Display Names` vide et remplis `Random Given Names` + `Random Family Names` (20+ chacun).
+- Auto-refresh :
+  - `Auto Refresh NPC Staff Recruitment Roster = true`
+  - `NPC Staff Recruitment Auto Refresh Interval Seconds = 120`
+
+---
+
+### Horloge in‑game (jour compressé) + paie quotidienne (payroll)
+
+Objectif : simuler une journée de 24h en un nombre de secondes IRL configurable (GTA-like), et débiter l’argent du joueur **à chaque nouveau jour** pour les employés en poste depuis **≥ 24h** in‑game.
+
+#### Propriétés (regroupées)
+
+Sous `TheHouse|Time` :
+
+- `In Game Day Length Real Seconds` (ex. 900 = 15 min IRL → 24h in‑game)
+- `In Game Hours Per Day` (défaut 24)
+
+Sous `TheHouse|Economy|Payroll` :
+
+- `Enable Daily Staff Payroll`
+- `Payroll Days Per Month` (défaut 30, conversion salaire mensuel → journalier)
+
+#### Fonctions utiles pour l’UI
+
+- `GetInGameClockText()` → `Jour X · HH:MM`
+- `GetInGameDayProgress01()` → progression 0..1 dans la journée
+
+#### Setup recommandé (exemple “1 jour = 15 minutes”)
+
+Dans `BP_HouseController` (Class Defaults) :
+
+- `In Game Day Length Real Seconds = 900`
+- `Enable Daily Staff Payroll = true`
+- `Payroll Days Per Month = 30`
+
+**Où changer la valeur :** `BP_HouseController` (Blueprint PlayerController) → **Class Defaults** → catégorie **`TheHouse|Time`**.
+
 ### Sélection RTS : cadre, UMG, panneau paramètres
 
 - **`Input_SelectPressed` / `Input_SelectReleased`** (`TheHousePlayerController.cpp`) : en mode RTS (pion = caméra), le **clic gauche** démarre un état **`bIsSelecting`** ; le timer **`TheHouse_PollInputFrame`** appelle **`ATheHouseHUD::UpdateSelection`** pour le rectangle vert.
@@ -341,7 +415,52 @@ Fichiers : `TheHouseFPSCharacter.h/.cpp`
 
 - Hérite de **`ACharacter`**, implémente **`ITheHouseSelectable`**.
 - **`bCanBeSelected`** : peut désactiver la sélection depuis le contrôleur RTS.
-- Entrées mouvement en booléens (pressed/released) sur les mappings du projet.
+- Entrées FPS via **Action Mappings legacy** (remappables) : saut, course, accroupi, tir.
+
+### Contrôles FPS (touches remappables)
+
+Les actions FPS sont définies dans **`Config/DefaultInput.ini`** :
+
+- `TheHouseFPSJump` : saut
+- `TheHouseFPSRun` : course (maintenu)
+- `TheHouseFPS_Crouch` : accroupi (maintenu)
+- `TheHouseFPSFire` : tir (clic gauche)
+
+### Caméra (socket tête) + anti-clipping
+
+- **Caméra sur tête** : `bCameraFollowsCharacterHead=true`, socket `FPSHeadCameraSocketName` (défaut `HeadCameraEmplacement`).
+- **Anti-clipping FPS** : `bHideMeshForOwnerInFPS` + (par défaut) `bHideOnlyHeadBonesForOwnerInFPS` + `OwnerHiddenBonesInFPS` (cache tête/nuque pour le joueur local, le corps reste visible).
+
+### Free-look (corps qui rattrape la visée)
+
+- Activer `bDelayBodyYawUntilLookSideways` pour autoriser une dissociation caméra/corps à l’arrêt.
+- Le corps rattrape au-delà de `BodyYawVsControlThresholdDegrees`, et se réaligne en mouvement si `bAlignBodyYawToControlWhenMoving` est true.
+
+### Animation locomotion (Anim BP)
+
+Pour piloter Blend Spaces + Aim Offsets, utiliser une Anim BP dont la classe parente est :
+
+- `UTheHouseLocomotionAnimInstance` (dossier `Source/TheHouse/Animation/`)
+
+Variables fournies (extraits) :
+
+- `LocomotionSpeed`, `LocomotionDirectionDegrees`
+- `bIsCrouching`, `bIsSprinting`, `bIsInAir`, `bJustLanded`, `LandImpactVerticalSpeed`, etc.
+- `SpineAimYawOffsetDegrees`, `SpineAimPitchOffsetDegrees` (AimOffset spine/head)
+
+### PV & mort (ragdoll)
+
+Le personnage FPS (et les PNJ) possèdent `UTheHouseHealthComponent` (dossier `Source/TheHouse/Core/`) :
+
+- écoute `OnTakeAnyDamage` (ApplyDamage / ApplyPointDamage)
+- mort à `Health<=0`
+- ragdoll auto (désactivation capsule + simulate physics) si activé
+
+### Tir (arme / projectile)
+
+- `ATheHouseWeapon` + `ATheHouseProjectile` (dossier `Source/TheHouse/Combat/`)
+- Muzzle socket : `Muzzle` sur le mesh de l’arme
+- Joueur : `ATheHouseFPSCharacter::FireWeaponOnce()` tire dans la direction de la caméra
 
 ---
 

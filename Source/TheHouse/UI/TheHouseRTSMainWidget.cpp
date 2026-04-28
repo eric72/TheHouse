@@ -12,6 +12,7 @@
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
+#include "Components/PanelWidget.h"
 #include "Internationalization/Text.h"
 #include "Styling/AppStyle.h"
 #include "Styling/SlateTypes.h" // FSlateChildSize, ESlateSizeRule
@@ -60,6 +61,47 @@ namespace TheHouseRTSMainWidgetInternal
 		}
 		return nullptr;
 	}
+
+	/** WBP : le `ScrollBox` peut être imbriqué (ex. panel latéral) sans BindWidgetOptional — le nom d’instance doit correspondre. */
+	static UScrollBox* FindScrollBoxRecursive(UWidget* W, const FName& TargetName)
+	{
+		if (!W)
+		{
+			return nullptr;
+		}
+		if (W->GetFName() == TargetName)
+		{
+			return Cast<UScrollBox>(W);
+		}
+		if (UUserWidget* UW = Cast<UUserWidget>(W))
+		{
+			if (UWidgetTree* InnerTree = UW->WidgetTree.Get())
+			{
+				if (UWidget* InnerRoot = InnerTree->RootWidget)
+				{
+					if (UScrollBox* Found = FindScrollBoxRecursive(InnerRoot, TargetName))
+					{
+						return Found;
+					}
+				}
+			}
+		}
+		if (UPanelWidget* Panel = Cast<UPanelWidget>(W))
+		{
+			const int32 Num = Panel->GetChildrenCount();
+			for (int32 i = 0; i < Num; ++i)
+			{
+				if (UWidget* Child = Panel->GetChildAt(i))
+				{
+					if (UScrollBox* Found = FindScrollBoxRecursive(Child, TargetName))
+					{
+						return Found;
+					}
+				}
+			}
+		}
+		return nullptr;
+	}
 }
 
 void UTheHouseRTSMainWidget::NativeConstruct()
@@ -86,6 +128,14 @@ void UTheHouseRTSMainWidget::RebuildRootIfNeeded()
 	if (MoneyText && CatalogScroll && StoredScroll)
 	{
 		RootCanvas = Cast<UCanvasPanel>(Tree->RootWidget);
+		if (!StaffPaletteScroll && Tree->RootWidget)
+		{
+			StaffPaletteScroll = TheHouseRTSMainWidgetInternal::FindScrollBoxRecursive(Tree->RootWidget, FName(TEXT("StaffPaletteScroll")));
+			if (!StaffPaletteScroll)
+			{
+				StaffPaletteScroll = TheHouseRTSMainWidgetInternal::FindScrollBoxRecursive(Tree->RootWidget, FName(TEXT("StaffListScroll")));
+			}
+		}
 		return;
 	}
 
@@ -382,13 +432,17 @@ void UTheHouseRTSMainWidget::RebuildStoredButtons()
 
 void UTheHouseRTSMainWidget::RebuildStaffPaletteButtons()
 {
-	if (!StaffPaletteScroll)
+	UWidgetTree* Tree = WidgetTree.Get();
+	if (!StaffPaletteScroll && Tree && Tree->RootWidget)
 	{
-		return;
+		StaffPaletteScroll = TheHouseRTSMainWidgetInternal::FindScrollBoxRecursive(Tree->RootWidget, FName(TEXT("StaffPaletteScroll")));
+		if (!StaffPaletteScroll)
+		{
+			StaffPaletteScroll = TheHouseRTSMainWidgetInternal::FindScrollBoxRecursive(Tree->RootWidget, FName(TEXT("StaffListScroll")));
+		}
 	}
 
-	UWidgetTree* Tree = WidgetTree.Get();
-	if (!Tree)
+	if (!StaffPaletteScroll || !Tree)
 	{
 		return;
 	}
@@ -406,6 +460,33 @@ void UTheHouseRTSMainWidget::RebuildStaffPaletteButtons()
 	const TArray<FTheHouseNPCStaffRosterOffer>& Roster = OwnerPC->GetNPCStaffRosterOffers();
 	const TArray<FTheHouseNPCStaffPaletteEntry>& Palette = OwnerPC->GetNPCStaffPalette();
 
+	int32 NumButtons = 0;
+
+	auto ApplyStaffPaletteRowStyle = [this](UTextBlock* Label)
+	{
+		if (!Label)
+		{
+			return;
+		}
+		if (StaffPaletteRowFontSize > 0)
+		{
+			FSlateFontInfo FontInfo = Label->GetFont();
+			FontInfo.Size = static_cast<float>(FMath::Clamp(StaffPaletteRowFontSize, 1, 96));
+			Label->SetFont(FontInfo);
+		}
+		Label->SetColorAndOpacity(StaffPaletteRowTextColor);
+	};
+
+	auto AddHint = [&](const FText& Msg)
+	{
+		UTextBlock* Hint = Tree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
+		Hint->SetText(Msg);
+		Hint->SetColorAndOpacity(FSlateColor(FLinearColor(0.75f, 0.75f, 0.8f)));
+		Hint->SetAutoWrapText(true);
+		Hint->SetVisibility(ESlateVisibility::HitTestInvisible);
+		V->AddChildToVerticalBox(Hint);
+	};
+
 	auto BuildRow = [&](
 		FText TitleText,
 		TSubclassOf<ATheHouseNPCCharacter> NPCClassForThumb,
@@ -417,7 +498,16 @@ void UTheHouseRTSMainWidget::RebuildStaffPaletteButtons()
 		Btn->SetClickMethod(EButtonClickMethod::MouseDown);
 
 		UHorizontalBox* Row = Tree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass());
-		if (UTexture2D* Thumb = TheHouseRTSMainWidgetInternal::FindStaffPaletteThumbnail(Palette, NPCClassForThumb))
+		UTexture2D* Thumb = nullptr;
+		if (RosterIdxOrNeg >= 0 && Roster.IsValidIndex(RosterIdxOrNeg))
+		{
+			Thumb = Roster[RosterIdxOrNeg].Thumbnail;
+		}
+		if (!Thumb)
+		{
+			Thumb = TheHouseRTSMainWidgetInternal::FindStaffPaletteThumbnail(Palette, NPCClassForThumb);
+		}
+		if (Thumb)
 		{
 			UImage* Img = Tree->ConstructWidget<UImage>(UImage::StaticClass());
 			Img->SetBrushFromTexture(Thumb, true);
@@ -432,8 +522,8 @@ void UTheHouseRTSMainWidget::RebuildStaffPaletteButtons()
 
 		UTextBlock* Label = Tree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
 		Label->SetText(TitleText);
-		Label->SetColorAndOpacity(FSlateColor(FLinearColor::White));
 		Label->SetVisibility(ESlateVisibility::HitTestInvisible);
+		ApplyStaffPaletteRowStyle(Label);
 		if (UHorizontalBoxSlot* TextSlot = Row->AddChildToHorizontalBox(Label))
 		{
 			FSlateChildSize TextFill;
@@ -456,71 +546,170 @@ void UTheHouseRTSMainWidget::RebuildStaffPaletteButtons()
 		Btn->SetIsEnabled(Cost == 0 || OwnerPC->GetMoney() >= Cost);
 
 		V->AddChildToVerticalBox(Btn);
+		++NumButtons;
+	};
+
+	auto BuildCategoryRow = [&](const FText& TitleText, const FName CategoryId)
+	{
+		UButton* Btn = Tree->ConstructWidget<UButton>(UButton::StaticClass());
+		Btn->SetStyle(FAppStyle::Get().GetWidgetStyle<FButtonStyle>("Button"));
+		Btn->SetClickMethod(EButtonClickMethod::MouseDown);
+
+		UTextBlock* Label = Tree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
+		Label->SetText(TitleText);
+		Label->SetVisibility(ESlateVisibility::HitTestInvisible);
+		ApplyStaffPaletteRowStyle(Label);
+		Btn->AddChild(Label);
+
+		UTheHouseRTSUIClickRelay* Relay = NewObject<UTheHouseRTSUIClickRelay>(this);
+		Relay->Kind = ETheHouseRTSUIClickKind::StaffRecruitmentPickCategory;
+		Relay->OwnerPC = OwnerPC;
+		Relay->StaffRecruitmentCategoryId = CategoryId;
+		ClickRelays.Add(Relay);
+		Btn->OnClicked.AddDynamic(Relay, &UTheHouseRTSUIClickRelay::RelayClicked);
+
+		V->AddChildToVerticalBox(Btn);
+		++NumButtons;
+	};
+
+	auto BuildBackRow = [&]()
+	{
+		UButton* Btn = Tree->ConstructWidget<UButton>(UButton::StaticClass());
+		Btn->SetStyle(FAppStyle::Get().GetWidgetStyle<FButtonStyle>("Button"));
+		Btn->SetClickMethod(EButtonClickMethod::MouseDown);
+
+		UTextBlock* Label = Tree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
+		Label->SetText(NSLOCTEXT("TheHouse", "RTSStaffRecruitmentBack", "← Métiers"));
+		Label->SetVisibility(ESlateVisibility::HitTestInvisible);
+		ApplyStaffPaletteRowStyle(Label);
+		Btn->AddChild(Label);
+
+		UTheHouseRTSUIClickRelay* Relay = NewObject<UTheHouseRTSUIClickRelay>(this);
+		Relay->Kind = ETheHouseRTSUIClickKind::StaffRecruitmentBackToCategories;
+		Relay->OwnerPC = OwnerPC;
+		ClickRelays.Add(Relay);
+		Btn->OnClicked.AddDynamic(Relay, &UTheHouseRTSUIClickRelay::RelayClicked);
+
+		V->AddChildToVerticalBox(Btn);
+		++NumButtons;
 	};
 
 	if (Roster.Num() > 0)
 	{
-		for (int32 i = 0; i < Roster.Num(); ++i)
+		const FName Browse = OwnerPC->GetStaffUiRosterBrowseCategoryId();
+		if (Browse.IsNone())
 		{
-			const FTheHouseNPCStaffRosterOffer& O = Roster[i];
-			if (!O.CharacterClass)
+			TMap<FName, FText> CategoryLabels;
+			for (const FTheHouseNPCStaffRosterOffer& O : Roster)
+			{
+				if (!O.CharacterClass)
+				{
+					continue;
+				}
+				if (!CategoryLabels.Contains(O.StaffCategoryId))
+				{
+					const FText L = O.StaffCategoryLabel.IsEmpty() ? FText::FromName(O.StaffCategoryId) : O.StaffCategoryLabel;
+					CategoryLabels.Add(O.StaffCategoryId, L);
+				}
+			}
+
+			TArray<FName> CategoryKeys;
+			CategoryLabels.GetKeys(CategoryKeys);
+			CategoryKeys.Sort([](const FName& A, const FName& B) {
+				return A.ToString().Compare(B.ToString()) < 0;
+			});
+
+			for (const FName& Key : CategoryKeys)
+			{
+				BuildCategoryRow(CategoryLabels[Key], Key);
+			}
+		}
+		else
+		{
+			BuildBackRow();
+
+			for (int32 i = 0; i < Roster.Num(); ++i)
+			{
+				const FTheHouseNPCStaffRosterOffer& O = Roster[i];
+				if (!O.CharacterClass || O.StaffCategoryId != Browse)
+				{
+					continue;
+				}
+
+				const int32 Cost = FMath::Max(0, O.HireCost);
+				if (Cost > 0 && OwnerPC->GetMoney() < Cost)
+				{
+					continue;
+				}
+
+				FText TitleText = O.DisplayName.IsEmpty() ? FText::FromString(O.CharacterClass->GetName()) : O.DisplayName;
+				if (Cost > 0)
+				{
+					TitleText = FText::Format(
+						NSLOCTEXT("TheHouse", "RTSStaffRosterRow", "{0} · ★{1} · {2}/mo — {3}"),
+						TitleText,
+						O.StarRating,
+						FText::AsNumber(FMath::RoundToInt(O.MonthlySalary)),
+						FText::AsNumber(Cost));
+				}
+				else
+				{
+					TitleText = FText::Format(
+						NSLOCTEXT("TheHouse", "RTSStaffRosterRowFree", "{0} · ★{1} · {2}/mo"),
+						TitleText,
+						O.StarRating,
+						FText::AsNumber(FMath::RoundToInt(O.MonthlySalary)));
+				}
+
+				BuildRow(TitleText, O.CharacterClass, Cost, i);
+			}
+		}
+	}
+	else
+	{
+		for (int32 i = 0; i < Palette.Num(); ++i)
+		{
+			const FTheHouseNPCStaffPaletteEntry& E = Palette[i];
+			if (!E.NPCClass)
 			{
 				continue;
 			}
 
-			const int32 Cost = FMath::Max(0, O.HireCost);
+			const int32 Cost = FMath::Max(0, E.HireCost);
 			if (Cost > 0 && OwnerPC->GetMoney() < Cost)
 			{
 				continue;
 			}
 
-			FText TitleText = O.DisplayName.IsEmpty() ? FText::FromString(O.CharacterClass->GetName()) : O.DisplayName;
+			FText TitleText = E.DisplayName.IsEmpty() ? FText::FromString(E.NPCClass->GetName()) : E.DisplayName;
 			if (Cost > 0)
 			{
 				TitleText = FText::Format(
-					NSLOCTEXT("TheHouse", "RTSStaffRosterRow", "{0} · ★{1} · {2}/mo — {3}"),
+					NSLOCTEXT("TheHouse", "RTSStaffRowWithPrice", "{0} — {1}"),
 					TitleText,
-					O.StarRating,
-					FText::AsNumber(FMath::RoundToInt(O.MonthlySalary)),
 					FText::AsNumber(Cost));
 			}
-			else
-			{
-				TitleText = FText::Format(
-					NSLOCTEXT("TheHouse", "RTSStaffRosterRowFree", "{0} · ★{1} · {2}/mo"),
-					TitleText,
-					O.StarRating,
-					FText::AsNumber(FMath::RoundToInt(O.MonthlySalary)));
-			}
 
-			BuildRow(TitleText, O.CharacterClass, Cost, i);
+			BuildRow(TitleText, E.NPCClass, Cost, INDEX_NONE);
 		}
-		return;
 	}
 
-	for (int32 i = 0; i < Palette.Num(); ++i)
+	if (NumButtons == 0)
 	{
-		const FTheHouseNPCStaffPaletteEntry& E = Palette[i];
-		if (!E.NPCClass)
+		if (Roster.Num() > 0 || Palette.Num() > 0)
 		{
-			continue;
+			AddHint(NSLOCTEXT(
+				"TheHouse",
+				"RTSStaffEmptyFiltered",
+				"Aucune ligne affichable (budget insuffisant ou filtre vide). Rafraîchissez le recrutement ou augmentez l’argent."));
 		}
-
-		const int32 Cost = FMath::Max(0, E.HireCost);
-		if (Cost > 0 && OwnerPC->GetMoney() < Cost)
+		else
 		{
-			continue;
+			AddHint(NSLOCTEXT(
+				"TheHouse",
+				"RTSStaffEmptyConfig",
+				"Aucun personnel : renseignez « NPC Staff Recruitment Pool » ou « NPC Staff Palette » sur le PlayerController, "
+				"ou placez un UScrollBox nommé StaffPaletteScroll dans ce panneau."));
 		}
-
-		FText TitleText = E.DisplayName.IsEmpty() ? FText::FromString(E.NPCClass->GetName()) : E.DisplayName;
-		if (Cost > 0)
-		{
-			TitleText = FText::Format(
-				NSLOCTEXT("TheHouse", "RTSStaffRowWithPrice", "{0} — {1}"),
-				TitleText,
-				FText::AsNumber(Cost));
-		}
-
-		BuildRow(TitleText, E.NPCClass, Cost, INDEX_NONE);
 	}
 }

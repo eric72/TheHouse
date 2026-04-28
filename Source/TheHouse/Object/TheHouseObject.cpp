@@ -316,7 +316,9 @@ void ATheHouseObject::SetHighlighted(bool bInHighlighted)
 
 bool ATheHouseObject::ShouldSkipHighlightOnPrimitive(UPrimitiveComponent* Prim) const
 {
-	return Prim && (Prim == ExclusionZoneVisualizer || Prim->IsVisualizationComponent());
+	// UE 5.7: IsVisualizationComponent() n'existe plus sur UPrimitiveComponent.
+	// On saute le visualizer d'exclusion et tout composant editor-only.
+	return Prim && (Prim == ExclusionZoneVisualizer || Prim->IsEditorOnly());
 }
 
 UMaterialInterface* ATheHouseObject::ResolveSelectionOverlayMaterial() const
@@ -1008,7 +1010,7 @@ void ATheHouseObject::ApplyBlockerOutlineToActor(AActor* Blocker)
 	Blocker->GetComponents(Primitives, /*bIncludeFromChildActors*/ true);
 	for (UPrimitiveComponent* Prim : Primitives)
 	{
-		if (!Prim || Prim == OtherExclusion || Prim->IsVisualizationComponent())
+		if (!Prim || Prim == OtherExclusion || Prim->IsEditorOnly())
 		{
 			continue;
 		}

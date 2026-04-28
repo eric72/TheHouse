@@ -9,8 +9,12 @@
 #include "TheHouse/UI/TheHouseRTSUITypes.h"
 #include "TheHouseNPCCharacter.generated.h"
 
+struct FTheHouseNPCPersistentState;
+
 class UTheHouseNPCArchetype;
 class UMaterialInterface;
+class UTheHouseHealthComponent;
+class ATheHouseWeapon;
 
 /**
  * Personnage PNJ : corps simulé (navigation, animations) + état runtime (argent client, etc.).
@@ -29,6 +33,51 @@ class THEHOUSE_API ATheHouseNPCCharacter : public ACharacter, public ITheHouseNP
 
 public:
 	ATheHouseNPCCharacter();
+
+	/** Identifiant persistant (survit aux changements de niveau via sous-système GameInstance). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="NPC|Persistence")
+	FGuid PersistentId;
+
+	/** Assigne l’id persistant (spawner/persistence). */
+	UFUNCTION(BlueprintCallable, Category="NPC|Persistence")
+	void SetPersistentId(const FGuid& NewId);
+
+	UFUNCTION(BlueprintPure, Category="NPC|Persistence")
+	bool HasPersistentId() const { return PersistentId.IsValid(); }
+
+	/**
+	 * Prévisualisation placement recrutement staff (RTS). Si true : hors `UTheHouseNPCPersistenceSubsystem`,
+	 * sinon Destroy du preview → état Simulated → `TryRespawnIfRelevant` peut respawner un fantôme en plus du PNJ confirmé.
+	 */
+	bool bStaffPlacementPreviewActor = false;
+
+	/** Applique les champs runtime issus de `FTheHouseNPCPersistentState` (après `ApplyArchetypeDefaults`). */
+	void ApplyPersistedRuntimeFields(const FTheHouseNPCPersistentState& State);
+
+	/**
+	 * Snapshot de l’action “en cours” (pour reprendre après Load).
+	 * Implémentation par défaut : retourne ActionId = None (pas de reprise spécifique).
+	 *
+	 * ActionRemainingSeconds : temps restant (secondes réelles) avant la fin de l’action courante.
+	 * TargetWorldLocation : optionnel (si l’action cible une position).
+	 */
+	UFUNCTION(BlueprintNativeEvent, Category="NPC|Persistence|Action")
+	void GetPersistedCurrentActionSnapshot(
+		FName& OutActionId,
+		float& OutActionRemainingSeconds,
+		bool& bOutHasTargetWorldLocation,
+		FVector& OutTargetWorldLocation) const;
+
+	/**
+	 * Réapplique une action en cours après Load/respawn.
+	 * Par défaut : ne fait rien. À implémenter en Blueprint ou en C++ selon ton IA.
+	 */
+	UFUNCTION(BlueprintNativeEvent, Category="NPC|Persistence|Action")
+	void ApplyPersistedCurrentActionSnapshot(
+		FName ActionId,
+		float ActionRemainingSeconds,
+		bool bHasTargetWorldLocation,
+		FVector TargetWorldLocation);
 
 	// --- AActor ---
 	virtual void BeginPlay() override;
@@ -81,6 +130,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "NPC|Staff")
 	float StaffMonthlySalary = 0.f;
 
+	/** Timestamp (secondes in-game) du début d’emploi (payroll). 0 = non-initialisé. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "NPC|Staff|Employment")
+	float StaffEmploymentStartInGameSeconds = 0.f;
+
+	/** Dernier jour in-game pour lequel le salaire a été payé. INDEX_NONE = jamais payé. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "NPC|Staff|Employment")
+	int32 StaffLastSalaryPaidDayIndex = INDEX_NONE;
+
+	/** Appelé par l’économie (PlayerController) au moment de l’embauche / placement confirmé. */
+	UFUNCTION(BlueprintCallable, Category="NPC|Staff|Employment")
+	void MarkStaffEmployedAtInGameTime(float InGameSeconds, int32 DayIndex);
+
 	UFUNCTION(BlueprintCallable, Category = "NPC|Staff")
 	void SetStaffMonthlySalary(float NewMonthlySalary);
 
@@ -112,6 +173,25 @@ public:
 	UFUNCTION(BlueprintNativeEvent, Category = "NPC|Combat|Guard")
 	void OnGuardAttackOrderIssued(ATheHouseNPCCharacter* AttackTarget);
 
+	// =========================================================
+	// HEALTH / COMBAT
+	// =========================================================
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="TheHouse|Health")
+	TObjectPtr<UTheHouseHealthComponent> HealthComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="TheHouse|Combat")
+	TObjectPtr<ATheHouseWeapon> EquippedWeapon;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="NPC|Combat|Weapon")
+	TSubclassOf<ATheHouseWeapon> DefaultWeaponClass;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="NPC|Combat|Weapon")
+	FName WeaponAttachSocketName = FName(TEXT("hand_rSocket"));
+
+	/** Tire une fois sur la cible si une arme est équipée. Retourne true si tir effectué. */
+	UFUNCTION(BlueprintCallable, Category="NPC|Combat|Weapon")
+	bool TryFireWeaponAtActor(AActor* TargetActor);
+
 	/** Retire de l’argent si le solde suffit (typiquement catégorie Customer). */
 	UFUNCTION(BlueprintCallable, Category = "NPC|Customer")
 	bool TrySpendFromWallet(float Amount);
@@ -124,7 +204,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "NPC|Staff")
 	void ApplyInitialHireFromRosterOffer(const FTheHouseNPCStaffRosterOffer& Offer);
 
-protected:
 	/**
 	 * Applique les valeurs par défaut depuis NPCArchetype (ex. portefeuille initial).
 	 * Appelée au BeginPlay et lorsque l’archetype change dans l’éditeur.
@@ -134,6 +213,7 @@ protected:
 	UFUNCTION(BlueprintNativeEvent, Category = "NPC|Advanced")
 	void ApplyArchetypeDefaults();
 
+protected:
 	/** Pile de restauration d’overlay + Custom Depth (voir `RTSSelectionOverlayMaterial`). */
 	struct FNPCSelectionOverlayRestore
 	{
@@ -147,6 +227,8 @@ protected:
 
 	void RestoreSelectionOverlayStack();
 	void ApplySkeletalSelectionHighlights();
+
+	void TheHouse_TryRestoreRuntimeFromPersistenceSubsystem();
 
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;

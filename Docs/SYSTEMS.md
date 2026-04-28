@@ -24,11 +24,17 @@ Résumé aligné sur le **code C++** actuel (`Source/TheHouse/`). Détail : `Doc
 ## Économie
 
 - Argent joueur, catalogue, stock empilé par classe ; intégration UI RTS (vignettes optionnelles sur `FTheHousePlaceableCatalogEntry`).
+- **Recrutement staff (roster)** : configuré sur `ATheHousePlayerController` via `NPCStaffRecruitmentPool` (règles) → génère `NPCStaffRosterOffers` (liste affichée, avec vignettes, noms, étoiles, salaires).
+- **Temps in‑game + paie** : horloge compressée (durée d’une journée en secondes IRL) + **payroll quotidien** (débit des salaires des employés après ≥ 24h in‑game).
 
 ## FPS
 
-- `ATheHouseFPSCharacter` : exploration, sélectionnable en RTS si activé.
-- Pas d’UI de gestion casino dédiée en mode FPS dans le périmètre actuel du C++.
+- **Bascule RTS ↔ FPS** : `ATheHousePlayerController::SwitchToFPS` / `SwitchToRTS`.
+- **Contrôles FPS** (remappables via `DefaultInput.ini` / écran options) : saut, course, accroupi, tir.
+- **Caméra FPS** : attachable à un socket (ex. `HeadCameraEmplacement`) ou à la capsule ; free-look optionnel (corps qui suit après un seuil) + réalignement en mouvement.
+- **Animation (locomotion)** : `UTheHouseLocomotionAnimInstance` expose Speed/Direction + états air/landing + offsets spine pour AimOffset (joueur & PNJ).
+- **PV & mort** : `UTheHouseHealthComponent` (ApplyDamage) ; ragdoll auto (désactivation capsule + simulate physics).
+- **Combat** : `ATheHouseWeapon` + `ATheHouseProjectile` (spawn depuis le muzzle socket `Muzzle`, fallback hitscan).
 
 ## Murs & environnement
 

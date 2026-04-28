@@ -59,6 +59,12 @@ void UTheHouseRTSUIClickRelay::RelayClicked()
 			OwnerPC->StartStaffNpcPlacementFromPalette(StaffNPCClass, StaffNPCPaletteHireCost);
 		}
 		break;
+	case ETheHouseRTSUIClickKind::StaffRecruitmentPickCategory:
+		OwnerPC->StaffUiSetRosterCategoryFilter(StaffRecruitmentCategoryId);
+		break;
+	case ETheHouseRTSUIClickKind::StaffRecruitmentBackToCategories:
+		OwnerPC->StaffUiClearRosterCategoryFilter();
+		break;
 	default:
 		break;
 	}

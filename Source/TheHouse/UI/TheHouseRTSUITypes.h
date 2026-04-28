@@ -116,8 +116,33 @@ struct FTheHouseNPCStaffPoolSlotDef
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|RTS|NPC|Recruitment", meta=(ClampMin="0"))
 	float HireCostSalaryMonths = 3.f;
 
+	/**
+	 * Noms complets prédéfinis (tirage au hasard par offre). Renseigné sur le **PlayerController** :
+	 * tableau `NPC Staff Recruitment Pool` → chaque slot — pas sur le Data Asset Staff.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|RTS|NPC|Recruitment")
 	TArray<FText> RandomDisplayNames;
+
+	/**
+	 * Prénoms / noms de famille : à chaque `RefreshNPCStaffRecruitmentOffers`, une paire est tirée au hasard
+	 * pour chaque offre (candidat distinct). Utilisé seulement si `RandomDisplayNames` est vide et que les deux listes sont non vides.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|RTS|NPC|Recruitment")
+	TArray<FText> RandomGivenNames;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|RTS|NPC|Recruitment")
+	TArray<FText> RandomFamilyNames;
+
+	/**
+	 * Regroupe les offres dans le panneau Personnel (liste de métiers puis candidats).
+	 * Si laissé à None, on utilise `StaffArchetype->StaffRoleId` s’il est défini, sinon `Staff`.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|RTS|NPC|Recruitment")
+	FName StaffCategoryId = NAME_None;
+
+	/** Libellé du métier dans la liste des catégories (sinon le nom de `StaffCategoryId`). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|RTS|NPC|Recruitment")
+	FText StaffCategoryLabel;
 };
 
 /** Une ligne du panneau Personnel lorsque le bassin recrutement est actif — stats figées pour la prévisualisation et le spawn final. */
@@ -144,12 +169,22 @@ struct FTheHouseNPCStaffRosterOffer
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|RTS|NPC|Recruitment")
 	FText DisplayName;
 
+	/** Optionnel : vignette dans la liste des recrues (panneau Personnel). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|RTS|NPC|Recruitment")
+	TObjectPtr<UTexture2D> Thumbnail = nullptr;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|RTS|NPC|Recruitment", meta=(ClampMin="0"))
 	int32 HireCost = 0;
 
 	/** Si ≥ 0 et dans les bornes des variants de l’archetype, ce mesh est utilisé (preview = spawn). Sinon tirage aléatoire habituel. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|RTS|NPC|Recruitment")
 	int32 MeshVariantRollIndex = INDEX_NONE;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="TheHouse|RTS|NPC|Recruitment")
+	FName StaffCategoryId = NAME_None;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="TheHouse|RTS|NPC|Recruitment")
+	FText StaffCategoryLabel;
 };
 
 /** Définition d’une option de menu contextuel (modifiable dans le BP du PlayerController). */

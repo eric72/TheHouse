@@ -4,10 +4,13 @@
 
 #include "TheHouse/UI/TheHouseRTSUITypes.h"
 #include "TheHouse/NPC/TheHouseNPCAIController.h"
+#include "TheHouse/Core/TheHouseHealthComponent.h"
+#include "TheHouse/Combat/TheHouseWeapon.h"
 #include "TheHouse/NPC/Archetypes/TheHouseNPCArchetype.h"
 #include "TheHouse/NPC/Archetypes/TheHouseNPCStaffArchetype.h"
 #include "TheHouse/NPC/Archetypes/TheHouseNPCCustomerArchetype.h"
 #include "TheHouse/NPC/TheHouseNPCSubsystem.h"
+#include "TheHouse/NPC/Persistence/TheHouseNPCPersistenceSubsystem.h"
 #include "TheHouse/Object/TheHouseObject.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -15,6 +18,7 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Engine/SkeletalMesh.h"
+#include "Engine/GameInstance.h"
 
 namespace TheHouseNPCSelectionInternal
 {
@@ -55,13 +59,120 @@ ATheHouseNPCCharacter::ATheHouseNPCCharacter()
 
 	GetCharacterMovement()->MaxWalkSpeed = 400.f;
 	GetCharacterMovement()->RotationRate = FRotator(0.f, 540.f, 0.f);
+
+	HealthComponent = CreateDefaultSubobject<UTheHouseHealthComponent>(TEXT("HealthComponent"));
+}
+
+void ATheHouseNPCCharacter::SetPersistentId(const FGuid& NewId)
+{
+	PersistentId = NewId;
+}
+
+void ATheHouseNPCCharacter::ApplyPersistedRuntimeFields(const FTheHouseNPCPersistentState& State)
+{
+	StaffIdentityDisplayName = State.DisplayName;
+	Wallet = State.Wallet;
+	SetStaffMonthlySalary(State.StaffMonthlySalary);
+	SetStaffStarRating(State.StaffStarRating);
+	StaffEmploymentStartInGameSeconds = State.StaffEmploymentStartInGameSeconds;
+	StaffLastSalaryPaidDayIndex = State.StaffLastSalaryPaidDayIndex;
+	StaffMeshVariantRollIndex = State.StaffMeshVariantRollIndex;
+
+	// Reprise action en cours (si implémentée).
+	if (State.CurrentActionId != NAME_None && State.CurrentActionRemainingSeconds > 0.f)
+	{
+		ApplyPersistedCurrentActionSnapshot(
+			State.CurrentActionId,
+			State.CurrentActionRemainingSeconds,
+			State.bHasCurrentActionTargetWorldLocation,
+			State.CurrentActionTargetWorldLocation);
+	}
+}
+
+void ATheHouseNPCCharacter::GetPersistedCurrentActionSnapshot_Implementation(
+	FName& OutActionId,
+	float& OutActionRemainingSeconds,
+	bool& bOutHasTargetWorldLocation,
+	FVector& OutTargetWorldLocation) const
+{
+	OutActionId = NAME_None;
+	OutActionRemainingSeconds = 0.f;
+	bOutHasTargetWorldLocation = false;
+	OutTargetWorldLocation = FVector::ZeroVector;
+}
+
+void ATheHouseNPCCharacter::ApplyPersistedCurrentActionSnapshot_Implementation(
+	FName ActionId,
+	float ActionRemainingSeconds,
+	bool bHasTargetWorldLocation,
+	FVector TargetWorldLocation)
+{
+	(void)ActionId;
+	(void)ActionRemainingSeconds;
+	(void)bHasTargetWorldLocation;
+	(void)TargetWorldLocation;
+}
+
+void ATheHouseNPCCharacter::TheHouse_TryRestoreRuntimeFromPersistenceSubsystem()
+{
+	if (!PersistentId.IsValid())
+	{
+		return;
+	}
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	UGameInstance* GI = World->GetGameInstance();
+	if (!GI)
+	{
+		return;
+	}
+	UTheHouseNPCPersistenceSubsystem* Persist = GI->GetSubsystem<UTheHouseNPCPersistenceSubsystem>();
+	if (!Persist)
+	{
+		return;
+	}
+
+	FTheHouseNPCPersistentState Copy;
+	if (!Persist->TryGetStateCopy(PersistentId, Copy))
+	{
+		return;
+	}
+
+	ApplyPersistedRuntimeFields(Copy);
 }
 
 void ATheHouseNPCCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// Ensure an id exists even for placed-in-world NPCs (or non-persistence spawns).
+	if (!PersistentId.IsValid())
+	{
+		PersistentId = FGuid::NewGuid();
+	}
+
 	ApplyArchetypeDefaults();
+	TheHouse_TryRestoreRuntimeFromPersistenceSubsystem();
+
+	// Spawn weapon (optional).
+	if (DefaultWeaponClass && GetWorld())
+	{
+		FActorSpawnParameters Params;
+		Params.Owner = this;
+		Params.Instigator = this;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		EquippedWeapon = GetWorld()->SpawnActor<ATheHouseWeapon>(DefaultWeaponClass, Params);
+		if (EquippedWeapon && GetMesh())
+		{
+			EquippedWeapon->AttachToComponent(
+				GetMesh(),
+				FAttachmentTransformRules::SnapToTargetNotIncludingScale,
+				WeaponAttachSocketName);
+		}
+	}
 
 	if (UWorld* World = GetWorld())
 	{
@@ -69,7 +180,29 @@ void ATheHouseNPCCharacter::BeginPlay()
 		{
 			Registry->RegisterNPC(this);
 		}
+
+		if (UGameInstance* GI = World->GetGameInstance())
+		{
+			if (UTheHouseNPCPersistenceSubsystem* Persist = GI->GetSubsystem<UTheHouseNPCPersistenceSubsystem>())
+			{
+				if (!bStaffPlacementPreviewActor)
+				{
+					Persist->RegisterSpawnedNPC(this);
+				}
+			}
+		}
 	}
+}
+
+bool ATheHouseNPCCharacter::TryFireWeaponAtActor(AActor* TargetActor)
+{
+	if (!EquippedWeapon || !IsValid(TargetActor))
+	{
+		return false;
+	}
+	const FVector Dir = (TargetActor->GetActorLocation() - EquippedWeapon->GetMuzzleTransform().GetLocation()).GetSafeNormal();
+	EquippedWeapon->FireInDirection(Dir);
+	return true;
 }
 
 void ATheHouseNPCCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -79,6 +212,17 @@ void ATheHouseNPCCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		if (UTheHouseNPCSubsystem* Registry = World->GetSubsystem<UTheHouseNPCSubsystem>())
 		{
 			Registry->UnregisterNPC(this);
+		}
+
+		if (UGameInstance* GI = World->GetGameInstance())
+		{
+			if (UTheHouseNPCPersistenceSubsystem* Persist = GI->GetSubsystem<UTheHouseNPCPersistenceSubsystem>())
+			{
+				if (!bStaffPlacementPreviewActor)
+				{
+					Persist->NotifyNPCDespawned(this);
+				}
+			}
 		}
 	}
 
@@ -268,6 +412,12 @@ void ATheHouseNPCCharacter::SetStaffMonthlySalary(const float NewMonthlySalary)
 void ATheHouseNPCCharacter::SetStaffStarRating(const int32 NewStars)
 {
 	StaffStarRating = FMath::Clamp(NewStars, 0, 5);
+}
+
+void ATheHouseNPCCharacter::MarkStaffEmployedAtInGameTime(const float InGameSeconds, const int32 DayIndex)
+{
+	StaffEmploymentStartInGameSeconds = FMath::Max(0.f, InGameSeconds);
+	StaffLastSalaryPaidDayIndex = DayIndex;
 }
 
 float ATheHouseNPCCharacter::GetStaffStarProgressionMultiplier() const

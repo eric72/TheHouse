@@ -179,6 +179,13 @@ ATheHouseNPCCharacter + ATheHouseNPCAIController → NPCs (not the PlayerControl
 
       <h2 id="fps">FPS character</h2>
       <p><code>ATheHouseFPSCharacter</code>: <code>ACharacter</code> + <code>ITheHouseSelectable</code>. <code>bCanBeSelected</code> toggles RTS selection.</p>
+      <ul>
+        <li><strong>FPS input</strong> (remappable): <code>TheHouseFPSJump</code>, <code>TheHouseFPSRun</code>, <code>TheHouseFPS_Crouch</code>, <code>TheHouseFPSFire</code>.</li>
+        <li><strong>Head socket camera</strong>: attach to a socket (e.g. <code>HeadCameraEmplacement</code>) + anti-clipping (hide head/neck bones for the locally controlled player).</li>
+        <li><strong>Locomotion animation</strong>: <code>UTheHouseLocomotionAnimInstance</code> (Speed/Direction, air/landing state, AimOffset yaw/pitch).</li>
+        <li><strong>Health &amp; death</strong>: <code>UTheHouseHealthComponent</code> (ApplyDamage), auto ragdoll.</li>
+        <li><strong>Combat</strong>: <code>ATheHouseWeapon</code> + <code>ATheHouseProjectile</code> (muzzle socket <code>Muzzle</code>), optional hitscan fallback.</li>
+      </ul>
 
       <h2 id="hud">HUD</h2>
       <p><code>ATheHouseHUD</code> draws the box. Actor picking for selection is in the PlayerController.</p>

@@ -17,8 +17,11 @@ class UTheHouseRTSUIClickRelay;
  * 1) BP_HouseController → Class Defaults → RTS Main Widget Class = ton WBP.
  * 2) Crée un Widget Blueprint hérité de cette classe.
  * 3) Dans le designer, nomme les widgets (BindWidgetOptional) :
- *    MoneyText, CatalogScroll, StoredScroll, et optionnellement StaffPaletteScroll (panneau PNJ staff).
+ *    MoneyText, CatalogScroll, StoredScroll, et pour le personnel un UScrollBox nommé **StaffPaletteScroll**
+ *    (ou **StaffListScroll**) n’importe où sous la racine / dans un sous-WBP : le C++ le retrouve même sans BindWidgetOptional.
  *    Le C++ y injecte texte / boutons. Tu peux les placer dans des onglets, WidgetSwitcher, etc.
+ *    Style des lignes personnel : **Staff Palette Row Font Size** / **Staff Palette Row Text Color** (Class Defaults du WBP).
+ *    Données recrutement (RandomDisplayNames, RandomGivenNames, etc.) : **NPC Staff Recruitment Pool** sur le **PlayerController** (BP), pas sur les Data Assets Staff.
  * 4) Implémente l’événement « After RTS Main Refreshed » pour synchroniser icônes / visibilité.
  *    Pour fermer des panneaux (catalogue/stock) sur Échap : surcharger « Escape Close Overlays » dans le WBP.
  *
@@ -69,6 +72,17 @@ protected:
 
 	UPROPERTY(meta=(BindWidgetOptional))
 	TObjectPtr<UTextBlock> MoneyText = nullptr;
+
+	/**
+	 * Lignes du panneau Personnel (métiers, candidats, « ← Métiers ») : taille de police Slate.
+	 * 0 = laisser la police par défaut du TextBlock.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|RTS|UI|Staff Palette", meta=(ClampMin="0", ClampMax="96", UIMin="0"))
+	int32 StaffPaletteRowFontSize = 0;
+
+	/** Couleur du texte pour ces mêmes lignes (défaut blanc, comme avant). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|RTS|UI|Staff Palette")
+	FSlateColor StaffPaletteRowTextColor = FSlateColor(FLinearColor::White);
 
 private:
 	void RebuildRootIfNeeded();

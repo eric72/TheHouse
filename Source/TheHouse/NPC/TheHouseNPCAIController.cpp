@@ -82,6 +82,12 @@ void ATheHouseNPCAIController::TickScriptedAttackFire()
 		return;
 	}
 
+	// Si le garde a une arme, tirer un projectile depuis le muzzle (sinon fallback hitscan ApplyPointDamage).
+	if (SelfNpc->TryFireWeaponAtActor(TargetNpc))
+	{
+		return;
+	}
+
 	const FVector Start = SelfNpc->GetPawnViewLocation();
 	const FVector End = TargetNpc->GetActorLocation() + FVector(0.f, 0.f, 50.f);
 

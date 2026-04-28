@@ -20,6 +20,7 @@
 #include "AI/TheHouseObjectSlotUserComponent.h"
 #include "TheHouse/NPC/TheHouseNPCCharacter.h"
 #include "TheHouse/NPC/TheHouseNPCIdentity.h"
+#include "TheHouse/NPC/TheHouseNPCSubsystem.h"
 #include "TheHouse/NPC/TheHouseNPCEjectRegionVolume.h"
 #include "TheHouse/NPC/TheHouseNPCAIController.h"
 #include "UI/TheHouseFPSHudWidget.h"
@@ -325,15 +326,9 @@ float PollMoveForward(const APlayerController *PC) {
   float v = 0.f;
   if (IsKeyPhysicallyDown(PC, EKeys::W) || IsKeyPhysicallyDown(PC, EKeys::Z)) {
     v += 1.f;
-    FString DebugMsg = FString::Printf(TEXT("Forward V value : %f"), v);
-    GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Red, DebugMsg);
   }
   if (IsKeyPhysicallyDown(PC, EKeys::S)) {
     v -= 1.f;
-    FString DebugMsg = FString::Printf(TEXT("Forward V value : %f"), v);
-    // On l'affiche (Note : on utilise %f pour un float, pas %d qui est pour les
-    // entiers)
-    GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Red, DebugMsg);
   }
   return FMath::Clamp(v, -1.f, 1.f);
 }
@@ -521,6 +516,8 @@ void ATheHousePlayerController::BeginPlay() {
 	EnsureDefaultRTSContextMenuDefs();
 	EnsureDefaultNPCRTSContextMenuDefs();
 	RefreshNPCStaffRecruitmentOffers();
+	TheHouse_StartRecruitmentAutoRefreshTimerIfNeeded();
+	TheHouse_StartInGameClockTimerIfNeeded();
 	InitializeModeWidgets();
 }
 
@@ -545,6 +542,8 @@ void ATheHousePlayerController::EndPlay(
     const EEndPlayReason::Type EndPlayReason) {
   if (GetWorld()) {
     GetWorldTimerManager().ClearTimer(TheHouseInputPollTimer);
+	GetWorldTimerManager().ClearTimer(TheHouseRecruitmentRefreshTimer);
+	GetWorldTimerManager().ClearTimer(TheHouseInGameClockTimer);
   }
 
   CloseRTSContextMenu();
@@ -560,6 +559,209 @@ void ATheHousePlayerController::EndPlay(
   }
 
   Super::EndPlay(EndPlayReason);
+}
+
+void ATheHousePlayerController::TheHouse_StartInGameClockTimerIfNeeded()
+{
+	if (!GetWorld())
+	{
+		return;
+	}
+	GetWorldTimerManager().ClearTimer(TheHouseInGameClockTimer);
+
+	InGameTimeSeconds = FMath::Max(0.f, InGameTimeSeconds);
+	InGameDayIndex = FMath::Max(0, InGameDayIndex);
+	InGameLastProcessedDayIndex = InGameDayIndex;
+
+	// Tick horloge 4×/sec : assez fluide pour une barre, léger.
+	GetWorldTimerManager().SetTimer(
+		TheHouseInGameClockTimer,
+		this,
+		&ATheHousePlayerController::TheHouse_OnInGameClockTick,
+		0.25f,
+		/*bLoop*/ true);
+}
+
+void ATheHousePlayerController::TheHouse_OnInGameClockTick()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	const float DayLen = FMath::Max(1.f, InGameDayLengthRealSeconds);
+	InGameTimeSeconds += 0.25f;
+
+	const int32 NewDay = FMath::FloorToInt(InGameTimeSeconds / DayLen);
+	if (NewDay != InGameDayIndex)
+	{
+		InGameDayIndex = FMath::Max(0, NewDay);
+		TheHouse_HandleNewInGameDay();
+	}
+
+	// Si tu affiches l’horloge dans le RTS main widget via WBP (TextBlock/ProgressBar bind),
+	// le refresh UI sera déclenché côté BP. Ici on ne force pas un RefreshAll chaque tick.
+}
+
+void ATheHousePlayerController::TheHouse_HandleNewInGameDay()
+{
+	// Dédoublonnage si jamais.
+	if (InGameDayIndex == InGameLastProcessedDayIndex)
+	{
+		return;
+	}
+	InGameLastProcessedDayIndex = InGameDayIndex;
+
+	if (!bEnableDailyStaffPayroll)
+	{
+		return;
+	}
+	if (PayrollDaysPerMonth <= 0)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	UTheHouseNPCSubsystem* Registry = World->GetSubsystem<UTheHouseNPCSubsystem>();
+	if (!Registry)
+	{
+		return;
+	}
+
+	// Pay only staff employed for >= 1 full day.
+	const TArray<ATheHouseNPCCharacter*> Staff = Registry->GetNPCsByCategory(ETheHouseNPCCategory::Staff);
+	const float DayLen = FMath::Max(1.f, InGameDayLengthRealSeconds);
+
+	int32 TotalPaid = 0;
+	for (ATheHouseNPCCharacter* Npc : Staff)
+	{
+		if (!IsValid(Npc))
+		{
+			continue;
+		}
+
+		// Must be employed (timestamp set) and not freshly hired today.
+		if (Npc->StaffEmploymentStartInGameSeconds <= 0.f)
+		{
+			continue;
+		}
+		const int32 HireDay = FMath::FloorToInt(Npc->StaffEmploymentStartInGameSeconds / DayLen);
+		if (InGameDayIndex - HireDay < 1)
+		{
+			continue;
+		}
+
+		if (Npc->StaffLastSalaryPaidDayIndex >= InGameDayIndex)
+		{
+			continue;
+		}
+
+		const float Daily = Npc->StaffMonthlySalary / float(FMath::Max(1, PayrollDaysPerMonth));
+		const int32 Charge = FMath::Max(0, FMath::RoundToInt(Daily));
+		if (Charge > 0)
+		{
+			Money = FMath::Max(0, Money - Charge);
+			TotalPaid += Charge;
+		}
+		Npc->StaffLastSalaryPaidDayIndex = InGameDayIndex;
+	}
+
+	if (TotalPaid > 0)
+	{
+		RefreshRTSMainWidget();
+	}
+}
+
+FText ATheHousePlayerController::GetInGameClockText() const
+{
+	const float DayLen = FMath::Max(1.f, InGameDayLengthRealSeconds);
+	const float DayFrac = FMath::Fmod(InGameTimeSeconds, DayLen) / DayLen;
+	const float Hours = FMath::Clamp(InGameHoursPerDay, 1.f, 48.f);
+	const float TotalHours = DayFrac * Hours;
+	const int32 H = FMath::FloorToInt(TotalHours);
+	const int32 M = FMath::FloorToInt((TotalHours - float(H)) * 60.f);
+
+	FNumberFormattingOptions TwoDigits;
+	TwoDigits.MinimumIntegralDigits = 2;
+	TwoDigits.MaximumIntegralDigits = 2;
+
+	return FText::Format(
+		NSLOCTEXT("TheHouse", "InGameClock", "Jour {0} · {1}:{2}"),
+		FText::AsNumber(InGameDayIndex + 1),
+		FText::AsNumber(H, &TwoDigits),
+		FText::AsNumber(M, &TwoDigits));
+}
+
+float ATheHousePlayerController::GetInGameDayProgress01() const
+{
+	const float DayLen = FMath::Max(1.f, InGameDayLengthRealSeconds);
+	return FMath::Fmod(InGameTimeSeconds, DayLen) / DayLen;
+}
+
+void ATheHousePlayerController::SetInGameClockState(const float NewInGameTimeSeconds, const int32 NewDayIndex)
+{
+	InGameTimeSeconds = FMath::Max(0.f, NewInGameTimeSeconds);
+
+	const float DayLen = FMath::Max(1.f, InGameDayLengthRealSeconds);
+	const int32 DerivedDay = FMath::Max(0, FMath::FloorToInt(InGameTimeSeconds / DayLen));
+	InGameDayIndex = FMath::Max(0, NewDayIndex);
+
+	// Si la valeur passée est incohérente, on force la cohérence.
+	if (InGameDayIndex != DerivedDay)
+	{
+		InGameDayIndex = DerivedDay;
+	}
+
+	InGameLastProcessedDayIndex = InGameDayIndex;
+
+	// Assure que le timer tourne (utile après Load).
+	TheHouse_StartInGameClockTimerIfNeeded();
+}
+
+void ATheHousePlayerController::TheHouse_StartRecruitmentAutoRefreshTimerIfNeeded()
+{
+	if (!GetWorld())
+	{
+		return;
+	}
+	GetWorldTimerManager().ClearTimer(TheHouseRecruitmentRefreshTimer);
+
+	if (!bAutoRefreshNPCStaffRecruitmentRoster)
+	{
+		return;
+	}
+	if (NPCStaffRecruitmentPool.Num() == 0)
+	{
+		return;
+	}
+	const float Interval = FMath::Max(0.f, NPCStaffRecruitmentAutoRefreshIntervalSeconds);
+	if (Interval <= 0.f)
+	{
+		return;
+	}
+
+	GetWorldTimerManager().SetTimer(
+		TheHouseRecruitmentRefreshTimer,
+		this,
+		&ATheHousePlayerController::TheHouse_OnRecruitmentAutoRefreshTimer,
+		Interval,
+		/*bLoop*/ true);
+}
+
+void ATheHousePlayerController::TheHouse_OnRecruitmentAutoRefreshTimer()
+{
+	// Refresh “vivant” : si le pool existe, régénère la liste entière (et donc les stats, noms, étoiles, etc.)
+	// La conso d’une offre au hiring est gérée dans ConfirmStaffNpcPlacement.
+	if (NPCStaffRecruitmentPool.Num() == 0)
+	{
+		return;
+	}
+	RefreshNPCStaffRecruitmentOffers();
 }
 
 void ATheHousePlayerController::OnPossess(APawn *InPawn) {
@@ -874,8 +1076,30 @@ void ATheHousePlayerController::SetupInputComponent() {
       this,
       &ATheHousePlayerController::Input_CancelOrCloseRts);
 
+  // FPS : saut / course / accroupi — noms d’actions = Project Settings → Input
+  // (TheHouseFPS*) ; remappable aussi via UInputSettings en jeu (écran options).
+  {
+    InputComponent->BindAction(TEXT("TheHouseFPSJump"), IE_Pressed, this,
+                               &ATheHousePlayerController::Input_FPSJumpPressed);
+    InputComponent->BindAction(TEXT("TheHouseFPSJump"), IE_Released, this,
+                               &ATheHousePlayerController::Input_FPSJumpReleased);
+    InputComponent->BindAction(TEXT("TheHouseFPSRun"), IE_Pressed, this,
+                               &ATheHousePlayerController::Input_FPSRunPressed);
+    InputComponent->BindAction(TEXT("TheHouseFPSRun"), IE_Released, this,
+                               &ATheHousePlayerController::Input_FPSRunReleased);
+    InputComponent->BindAction(TEXT("TheHouseFPS_Crouch"), IE_Pressed, this,
+                               &ATheHousePlayerController::Input_FPSCrouchPressed);
+    InputComponent->BindAction(TEXT("TheHouseFPS_Crouch"), IE_Released, this,
+                               &ATheHousePlayerController::Input_FPSCrouchReleased);
+
+    InputComponent->BindAction(TEXT("TheHouseFPSFire"), IE_Pressed, this,
+                               &ATheHousePlayerController::Input_FPSFirePressed);
+  }
+
   // RTSObjectContext (RMB) : volontairement NON bindé ici — géré uniquement par
   // TheHouse_PollInputFrame (voir commentaire au-dessus du bloc RMB).
+
+
 }
 
 void ATheHousePlayerController::DebugStartPlacement()
@@ -964,6 +1188,11 @@ void ATheHousePlayerController::CancelPlacement()
 
 void ATheHousePlayerController::RTS_DeselectAll(bool bClosePlacedObjectSettings)
 {
+	// Désélection RTS = reset gameplay ; l'appelant décide si les UI modales doivent fermer.
+	// Par défaut on ferme le panneau paramètres, mais les menus contextuels doivent aussi partir
+	// quand on "clique dans le vide" (la plupart des appels passent par bClosePlacedObjectSettings=true).
+	CloseRtsModalUi(/*bClosePlacedObjectSettings=*/bClosePlacedObjectSettings);
+
 	for (TWeakObjectPtr<AActor>& W : RTSSelectedActors)
 	{
 		if (AActor* A = W.Get())
@@ -982,12 +1211,17 @@ void ATheHousePlayerController::RTS_DeselectAll(bool bClosePlacedObjectSettings)
 		}
 	}
 	RTSSelectedActors.Reset();
+	LastRtsParamPanelObjectReleaseTimeSeconds = -1.0;
+	LastRtsParamPanelObjectRelease.Reset();
+}
+
+void ATheHousePlayerController::CloseRtsModalUi(bool bClosePlacedObjectSettings)
+{
+	CloseRTSContextMenu();
 	if (bClosePlacedObjectSettings)
 	{
 		ClosePlacedObjectSettingsWidget();
 	}
-	LastRtsParamPanelObjectReleaseTimeSeconds = -1.0;
-	LastRtsParamPanelObjectRelease.Reset();
 }
 
 void ATheHousePlayerController::CancelScriptedGuardAttackOnSelectedNPCs()
@@ -1255,7 +1489,18 @@ void ATheHousePlayerController::MoveRight(float Value) {
   APawn *ControlledPawn = GetPawn();
   if (ControlledPawn) {
     if (ACharacter *Char = Cast<ACharacter>(ControlledPawn)) {
-      Char->AddMovementInput(Char->GetActorRightVector(), Value, true);
+      // FPS : même repère que MoveForward (yaw contrôleur) pour que strafe suive la visée
+      // même si le corps pivote en retard (bDelayBodyYawUntilLookSideways).
+      if (Cast<ATheHouseFPSCharacter>(Char))
+      {
+        const FRotator YawRot(0.f, GetControlRotation().Yaw, 0.f);
+        const FVector RtDir = FRotationMatrix(YawRot).GetUnitAxis(EAxis::Y);
+        Char->AddMovementInput(RtDir, Value, true);
+      }
+      else
+      {
+        Char->AddMovementInput(Char->GetActorRightVector(), Value, true);
+      }
     } else if (ATheHouseCameraPawn *Rts =
                    Cast<ATheHouseCameraPawn>(ControlledPawn)) {
       // Camera-Relative Right/Left
@@ -1290,8 +1535,12 @@ void ATheHousePlayerController::Zoom(float Value) {
   }
   const float MinL = FMath::Max(200.f, RTSCameraMinArmLength);
   const float MaxL = FMath::Max(MinL + 1.f, RTSCameraMaxArmLength);
-  const float NewLength =
-      FMath::Clamp(OldLength + (ScaledValue * RTSZoomSpeed * -1.f), MinL, MaxL);
+  // Zoom symétrique : appliquer un changement relatif (multiplicatif) pour que
+  // zoom-in puis zoom-out avec le même input reviennent au même arm length.
+  // On conserve RTSZoomSpeed comme "intensité" via un delta équivalent à l'ancienne formule.
+  const float DeltaLen = (ScaledValue * RTSZoomSpeed * -1.f);
+  const float Mult = FMath::Exp(DeltaLen / FMath::Max(OldLength, 1.f));
+  const float NewLength = FMath::Clamp(OldLength * Mult, MinL, MaxL);
   TargetZoomLength = NewLength;
   if (RTSZoomInterpSpeed <= KINDA_SMALL_NUMBER) {
     Cam->CameraBoom->TargetArmLength = NewLength;
@@ -1400,6 +1649,62 @@ void ATheHousePlayerController::LookUp(float Value) {
   }
 }
 
+void ATheHousePlayerController::Input_FPSJumpPressed()
+{
+	if (ATheHouseFPSCharacter* Fps = Cast<ATheHouseFPSCharacter>(GetPawn()))
+	{
+		Fps->Jump();
+	}
+}
+
+void ATheHousePlayerController::Input_FPSJumpReleased()
+{
+	if (ATheHouseFPSCharacter* Fps = Cast<ATheHouseFPSCharacter>(GetPawn()))
+	{
+		Fps->StopJumping();
+	}
+}
+
+void ATheHousePlayerController::Input_FPSRunPressed()
+{
+	if (ATheHouseFPSCharacter* Fps = Cast<ATheHouseFPSCharacter>(GetPawn()))
+	{
+		Fps->SetFPSMovementSprinting(true);
+	}
+}
+
+void ATheHousePlayerController::Input_FPSRunReleased()
+{
+	if (ATheHouseFPSCharacter* Fps = Cast<ATheHouseFPSCharacter>(GetPawn()))
+	{
+		Fps->SetFPSMovementSprinting(false);
+	}
+}
+
+void ATheHousePlayerController::Input_FPSCrouchPressed()
+{
+	if (ATheHouseFPSCharacter* Fps = Cast<ATheHouseFPSCharacter>(GetPawn()))
+	{
+		Fps->Crouch();
+	}
+}
+
+void ATheHousePlayerController::Input_FPSCrouchReleased()
+{
+	if (ATheHouseFPSCharacter* Fps = Cast<ATheHouseFPSCharacter>(GetPawn()))
+	{
+		Fps->UnCrouch();
+	}
+}
+
+void ATheHousePlayerController::Input_FPSFirePressed()
+{
+	if (ATheHouseFPSCharacter* Fps = Cast<ATheHouseFPSCharacter>(GetPawn()))
+	{
+		Fps->FireWeaponOnce();
+	}
+}
+
 #pragma endregion
 
 #pragma region Mode Switching
@@ -1462,6 +1767,8 @@ void ATheHousePlayerController::SwitchToFPS(FVector TargetLocation, FRotator Tar
 
 	// Placement preview is RTS-only.
 	CancelPlacement();
+	// Quitter le mode RTS => toujours enlever la sélection RTS (sinon overlay / custom depth restent).
+	RTS_DeselectAll(/*bClosePlacedObjectSettings=*/true);
 	CloseRTSContextMenu();
 	ClosePlacedObjectSettingsWidget();
 
@@ -1516,6 +1823,10 @@ void ATheHousePlayerController::SwitchToFPS(FVector TargetLocation, FRotator Tar
 				}
 			}
 		}
+
+		// Capsule-only world collision (meshes visible for anim tests but do not block traces / camera).
+		ActiveFPSCharacter->ApplyFirstPersonCapsuleOnlyCollision();
+		ActiveFPSCharacter->RefreshFPSCameraAttachment();
 
 		// Gravité : ACharacter::Restart() (appelé par Possess) réinitialise le
 		// MovementMode. On la force 0.1s plus tard, après que Restart() soit terminé,
@@ -1617,15 +1928,11 @@ void ATheHousePlayerController::DebugSwitchToFPS() {
 void ATheHousePlayerController::Input_SelectPressed() {
   if (Cast<ATheHouseCameraPawn>(GetPawn()) != nullptr)
   {
-    const UWorld* W = GetWorld();
-    const double NowSec = W ? W->GetTimeSeconds() : 0.0;
-    if (LastRtsLmbSelectPressDedupeTimeSeconds >= 0.0 &&
-        FMath::IsNearlyEqual(NowSec, LastRtsLmbSelectPressDedupeTimeSeconds,
-                             TheHouse_RTSContextMenuSameInstantEpsilon))
+    if (LastRtsLmbSelectPressFrame == GFrameCounter)
     {
       return;
     }
-    LastRtsLmbSelectPressDedupeTimeSeconds = NowSec;
+    LastRtsLmbSelectPressFrame = GFrameCounter;
   }
 
   bRtsSelectGestureFromWorld = false;
@@ -1680,15 +1987,11 @@ void ATheHousePlayerController::Input_SelectPressed() {
 void ATheHousePlayerController::Input_SelectReleased() {
   if (Cast<ATheHouseCameraPawn>(GetPawn()) != nullptr)
   {
-    const UWorld* W = GetWorld();
-    const double NowSec = W ? W->GetTimeSeconds() : 0.0;
-    if (LastRtsLmbSelectReleaseDedupeTimeSeconds >= 0.0 &&
-        FMath::IsNearlyEqual(NowSec, LastRtsLmbSelectReleaseDedupeTimeSeconds,
-                             TheHouse_RTSContextMenuSameInstantEpsilon))
+    if (LastRtsLmbSelectReleaseFrame == GFrameCounter)
     {
       return;
     }
-    LastRtsLmbSelectReleaseDedupeTimeSeconds = NowSec;
+    LastRtsLmbSelectReleaseFrame = GFrameCounter;
   }
 
   const bool bGestureFromWorld = bRtsSelectGestureFromWorld;
@@ -1697,6 +2000,12 @@ void ATheHousePlayerController::Input_SelectReleased() {
   // If context menu is open, do not run selection logic.
   if (AnyRTSContextMenuOpen())
   {
+	// Clic gauche en dehors des menus modaux : fermer les menus (même comportement que RMB toggle),
+	// sinon laisser l'UMG recevoir le release (ne pas fermer quand le curseur est sur le menu).
+	if (!TheHouse_IsModalRtsUiBlockingWorldSelection())
+	{
+		CloseRtsModalUi(/*bClosePlacedObjectSettings=*/true);
+	}
     bIsSelecting = false;
     if (ATheHouseHUD* HUD = Cast<ATheHouseHUD>(GetHUD()))
     {
@@ -1938,18 +2247,9 @@ void ATheHousePlayerController::PlayerTick(float DeltaTime)
       UpdatePlacementPreview();
     }
 
-    // Fallback confirm: independent of ActionMappings/EnhancedInput quirks.
-    // If we're previewing and the user left-clicks (without rotate modifier), confirm placement.
-    // Même si Select ne confirme pas la pose quand le menu est ouvert, ce fallback
-    // PlayerTick ignorait RTSContextMenuInstance → le clic « mangeait » l’UI du menu.
-    if (!AnyRTSContextMenuOpen() && bIsInRTSPlacementContext && PlacementState == EPlacementState::Previewing &&
-        StaffPlacementPreviewNpc && !bIsRotateModifierDown)
-    {
-      if (WasInputKeyJustPressed(EKeys::LeftMouseButton))
-      {
-        ConfirmStaffNpcPlacement();
-      }
-    }
+    // Fallback confirm (objets placés uniquement): indépendant des ActionMappings / EnhancedInput.
+    // Le staff recruitment utilise déjà Input_SelectPressed / double-clic ; un second chemin ici
+    // doublait ConfirmStaffNpcPlacement() (poll LMB + bind Select dans la même frame).
 
     if (!AnyRTSContextMenuOpen() && bIsInRTSPlacementContext && PlacementState == EPlacementState::Previewing && PreviewActor &&
         !bIsRotateModifierDown)
@@ -2309,9 +2609,22 @@ void ATheHousePlayerController::ConfigureStaffNpcDeferredFromOffer(ATheHouseNPCC
 	}
 }
 
+void ATheHousePlayerController::StaffUiSetRosterCategoryFilter(const FName CategoryId)
+{
+	StaffUiRosterBrowseCategoryId = CategoryId;
+	RefreshRTSMainWidget();
+}
+
+void ATheHousePlayerController::StaffUiClearRosterCategoryFilter()
+{
+	StaffUiRosterBrowseCategoryId = NAME_None;
+	RefreshRTSMainWidget();
+}
+
 void ATheHousePlayerController::RefreshNPCStaffRecruitmentOffers()
 {
 	NPCStaffRosterOffers.Reset();
+	StaffUiRosterBrowseCategoryId = NAME_None;
 	if (NPCStaffRecruitmentPool.Num() == 0)
 	{
 		RefreshRTSMainWidget();
@@ -2334,6 +2647,36 @@ void ATheHousePlayerController::RefreshNPCStaffRecruitmentOffers()
 
 		const float BaseSalary = FMath::Max(0.f, Slot.StaffArchetype->DefaultMonthlySalary);
 
+		TSet<FString> UsedProceduralNamesThisSlot;
+		auto PickProceduralDisplayName = [&]()
+		{
+			if (Slot.RandomGivenNames.Num() == 0 || Slot.RandomFamilyNames.Num() == 0)
+			{
+				return FText::GetEmpty();
+			}
+			for (int32 Attempt = 0; Attempt < 48; ++Attempt)
+			{
+				const int32 Gi = FMath::RandRange(0, Slot.RandomGivenNames.Num() - 1);
+				const int32 Fi = FMath::RandRange(0, Slot.RandomFamilyNames.Num() - 1);
+				const FText Composed = FText::Format(
+					NSLOCTEXT("TheHouse", "StaffRosterProceduralFullName", "{0} {1}"),
+					Slot.RandomGivenNames[Gi],
+					Slot.RandomFamilyNames[Fi]);
+				const FString Key = Composed.ToString();
+				if (!UsedProceduralNamesThisSlot.Contains(Key))
+				{
+					UsedProceduralNamesThisSlot.Add(Key);
+					return Composed;
+				}
+			}
+			const int32 Gi = FMath::RandRange(0, Slot.RandomGivenNames.Num() - 1);
+			const int32 Fi = FMath::RandRange(0, Slot.RandomFamilyNames.Num() - 1);
+			return FText::Format(
+				NSLOCTEXT("TheHouse", "StaffRosterProceduralFullName", "{0} {1}"),
+				Slot.RandomGivenNames[Gi],
+				Slot.RandomFamilyNames[Fi]);
+		};
+
 		for (int32 n = 0; n < Offers; ++n)
 		{
 			FTheHouseNPCStaffRosterOffer Offer;
@@ -2341,20 +2684,62 @@ void ATheHousePlayerController::RefreshNPCStaffRecruitmentOffers()
 			Offer.CharacterClass = Slot.CharacterClass;
 			Offer.StaffArchetype = Slot.StaffArchetype;
 
+			if (!Slot.StaffCategoryId.IsNone())
+			{
+				Offer.StaffCategoryId = Slot.StaffCategoryId;
+			}
+			else if (Slot.StaffArchetype && Slot.StaffArchetype->StaffRoleId != NAME_None)
+			{
+				Offer.StaffCategoryId = Slot.StaffArchetype->StaffRoleId;
+			}
+			else
+			{
+				Offer.StaffCategoryId = FName(TEXT("Staff"));
+			}
+
+			if (!Slot.StaffCategoryLabel.IsEmpty())
+			{
+				Offer.StaffCategoryLabel = Slot.StaffCategoryLabel;
+			}
+			else
+			{
+				Offer.StaffCategoryLabel = FText::FromName(Offer.StaffCategoryId);
+			}
+
 			const float Mul = FMath::FRandRange(MulMin, MulMax);
 			Offer.MonthlySalary = FMath::Max(0.f, BaseSalary * Mul);
 			Offer.StarRating = FMath::RandRange(StarLo, StarHi);
+			Offer.Thumbnail = Slot.StaffArchetype ? Slot.StaffArchetype->StaffPortrait : nullptr;
 
 			if (Slot.RandomDisplayNames.Num() > 0)
 			{
 				const int32 Ni = FMath::RandRange(0, Slot.RandomDisplayNames.Num() - 1);
 				Offer.DisplayName = Slot.RandomDisplayNames[Ni];
 			}
+			else if (const FText ProcName = PickProceduralDisplayName(); !ProcName.IsEmpty())
+			{
+				Offer.DisplayName = ProcName;
+			}
+			else if (Slot.StaffArchetype && !Slot.StaffArchetype->DisplayName.IsEmpty())
+			{
+				// Identity > NPC|Archetype|Identity|DisplayName sur le Data Asset Staff.
+				if (Offers > 1)
+				{
+					Offer.DisplayName = FText::Format(
+						NSLOCTEXT("TheHouse", "StaffRosterArchetypeNameIndexed", "{0} ({1})"),
+						Slot.StaffArchetype->DisplayName,
+						FText::AsNumber(n + 1));
+				}
+				else
+				{
+					Offer.DisplayName = Slot.StaffArchetype->DisplayName;
+				}
+			}
 			else
 			{
 				Offer.DisplayName = FText::Format(
 					NSLOCTEXT("TheHouse", "StaffRosterGenericName", "{0} #{1}"),
-					FText::FromString(Slot.StaffArchetype->GetName()),
+					Offer.StaffCategoryLabel.IsEmpty() ? FText::FromName(Offer.StaffCategoryId) : Offer.StaffCategoryLabel,
 					FText::AsNumber(Offer.OfferIndexInRoster));
 			}
 
@@ -2378,9 +2763,28 @@ void ATheHousePlayerController::RefreshNPCStaffRecruitmentOffers()
 	RefreshRTSMainWidget();
 }
 
+void ATheHousePlayerController::ClearNPCStaffRecruitmentPoolSlots()
+{
+	NPCStaffRecruitmentPool.Reset();
+	RefreshNPCStaffRecruitmentOffers();
+}
+
+void ATheHousePlayerController::AddNPCStaffRecruitmentPoolSlot(const FTheHouseNPCStaffPoolSlotDef& Slot, const bool bRebuildRosterAndUi)
+{
+	NPCStaffRecruitmentPool.Add(Slot);
+	if (bRebuildRosterAndUi)
+	{
+		RefreshNPCStaffRecruitmentOffers();
+	}
+}
+
 void ATheHousePlayerController::StartStaffNpcPlacementFromRosterOffer(int32 RosterOfferIndex)
 {
-	if (!NPCStaffRosterOffers.IsValidIndex(RosterOfferIndex) || !RTSPawnReference || GetPawn() != RTSPawnReference)
+	if (!NPCStaffRosterOffers.IsValidIndex(RosterOfferIndex))
+	{
+		return;
+	}
+	if (!RTSPawnReference || GetPawn() != RTSPawnReference)
 	{
 		return;
 	}
@@ -2394,6 +2798,7 @@ void ATheHousePlayerController::StartStaffNpcPlacementFromRosterOffer(int32 Rost
 	CancelPlacement();
 
 	PendingStaffSpawnOffer = Pick;
+	PendingStaffSpawnOfferRosterIndex = RosterOfferIndex;
 
 	RTS_DeselectAll();
 
@@ -2401,6 +2806,7 @@ void ATheHousePlayerController::StartStaffNpcPlacementFromRosterOffer(int32 Rost
 	if (!World || !Pick.CharacterClass)
 	{
 		PendingStaffSpawnOffer = FTheHouseNPCStaffRosterOffer();
+		PendingStaffSpawnOfferRosterIndex = INDEX_NONE;
 		return;
 	}
 
@@ -2415,18 +2821,28 @@ void ATheHousePlayerController::StartStaffNpcPlacementFromRosterOffer(int32 Rost
 	if (!Npc)
 	{
 		PendingStaffSpawnOffer = FTheHouseNPCStaffRosterOffer();
+		PendingStaffSpawnOfferRosterIndex = INDEX_NONE;
 		return;
 	}
 
 	Npc->AutoPossessAI = EAutoPossessAI::Disabled;
 	Npc->AIControllerClass = nullptr;
 
+	Npc->bStaffPlacementPreviewActor = true;
+
 	ConfigureStaffNpcDeferredFromOffer(Npc, PendingStaffSpawnOffer);
 
 	UGameplayStatics::FinishSpawningActor(Npc, FTransform::Identity);
 
 	StaffPlacementPreviewNpc = Npc;
+	StaffPlacementPreviewNpc->SetActorHiddenInGame(false);
 	StaffPlacementPreviewNpc->SetActorEnableCollision(false);
+	StaffPlacementPreviewNpc->SetActorScale3D(FVector::OneVector);
+	if (USkeletalMeshComponent* Sk = StaffPlacementPreviewNpc->GetMesh())
+	{
+		Sk->SetVisibility(true, /*bPropagateToChildren*/ true);
+		Sk->SetHiddenInGame(false, /*bPropagateToChildren*/ true);
+	}
 	if (UCapsuleComponent* Cap = StaffPlacementPreviewNpc->GetCapsuleComponent())
 	{
 		Cap->SetCollisionEnabled(ECollisionEnabled::NoCollision);
@@ -2443,7 +2859,11 @@ void ATheHousePlayerController::StartStaffNpcPlacementFromRosterOffer(int32 Rost
 
 void ATheHousePlayerController::StartStaffNpcPlacementFromPalette(TSubclassOf<ATheHouseNPCCharacter> NPCClass, int32 HireCost)
 {
-	if (!NPCClass || !RTSPawnReference || GetPawn() != RTSPawnReference)
+	if (!NPCClass)
+	{
+		return;
+	}
+	if (!RTSPawnReference || GetPawn() != RTSPawnReference)
 	{
 		return;
 	}
@@ -2461,6 +2881,7 @@ void ATheHousePlayerController::StartStaffNpcPlacementFromPalette(TSubclassOf<AT
 	CancelPlacement();
 
 	PendingStaffSpawnOffer = Offer;
+	PendingStaffSpawnOfferRosterIndex = INDEX_NONE;
 
 	RTS_DeselectAll();
 
@@ -2481,18 +2902,28 @@ void ATheHousePlayerController::StartStaffNpcPlacementFromPalette(TSubclassOf<AT
 	if (!Npc)
 	{
 		PendingStaffSpawnOffer = FTheHouseNPCStaffRosterOffer();
+		PendingStaffSpawnOfferRosterIndex = INDEX_NONE;
 		return;
 	}
 
 	Npc->AutoPossessAI = EAutoPossessAI::Disabled;
 	Npc->AIControllerClass = nullptr;
 
+	Npc->bStaffPlacementPreviewActor = true;
+
 	ConfigureStaffNpcDeferredFromOffer(Npc, PendingStaffSpawnOffer);
 
 	UGameplayStatics::FinishSpawningActor(Npc, FTransform::Identity);
 
 	StaffPlacementPreviewNpc = Npc;
+	StaffPlacementPreviewNpc->SetActorHiddenInGame(false);
 	StaffPlacementPreviewNpc->SetActorEnableCollision(false);
+	StaffPlacementPreviewNpc->SetActorScale3D(FVector::OneVector);
+	if (USkeletalMeshComponent* Sk = StaffPlacementPreviewNpc->GetMesh())
+	{
+		Sk->SetVisibility(true, /*bPropagateToChildren*/ true);
+		Sk->SetHiddenInGame(false, /*bPropagateToChildren*/ true);
+	}
 	if (UCapsuleComponent* Cap = StaffPlacementPreviewNpc->GetCapsuleComponent())
 	{
 		Cap->SetCollisionEnabled(ECollisionEnabled::NoCollision);
@@ -2517,8 +2948,21 @@ void ATheHousePlayerController::ConfirmStaffNpcPlacement()
 	{
 		return;
 	}
+	if (bStaffNpcConfirmInFlight)
+	{
+		return;
+	}
+	bStaffNpcConfirmInFlight = true;
 
 	const FTheHouseNPCStaffRosterOffer OfferCopy = PendingStaffSpawnOffer;
+	const int32 OfferSourceRosterIndex = PendingStaffSpawnOfferRosterIndex;
+
+	struct FResetStaffConfirm
+	{
+		bool& bFlag;
+		~FResetStaffConfirm() { bFlag = false; }
+	} ResetStaffConfirm{ bStaffNpcConfirmInFlight };
+
 	if (OfferCopy.HireCost > Money)
 	{
 		return;
@@ -2558,12 +3002,57 @@ void ATheHousePlayerController::ConfirmStaffNpcPlacement()
 
 	TheHouseStaffPlacementInternal::ApplyStaffOfferRuntimeStatsIfRoster(Live, OfferCopy);
 
+	// Mark as employed for payroll (start counting from now).
+	Live->MarkStaffEmployedAtInGameTime(InGameTimeSeconds, InGameDayIndex);
+
 	if (OfferCopy.HireCost > 0)
 	{
 		Money = FMath::Max(0, Money - OfferCopy.HireCost);
 	}
 
-	RefreshRTSMainWidget();
+	// Consommer l’offre du roster (si elle venait du roster) : elle ne doit plus être embauchable telle quelle.
+	bool bConsumedFromRoster = false;
+	if (OfferSourceRosterIndex >= 0 && NPCStaffRosterOffers.Num() > 0)
+	{
+		int32 RemoveIdx = INDEX_NONE;
+		// 1) Si l’index d’origine correspond encore à la même offre, retirer directement.
+		if (NPCStaffRosterOffers.IsValidIndex(OfferSourceRosterIndex))
+		{
+			const FTheHouseNPCStaffRosterOffer& Current = NPCStaffRosterOffers[OfferSourceRosterIndex];
+			if (Current.OfferIndexInRoster == OfferCopy.OfferIndexInRoster && Current.CharacterClass == OfferCopy.CharacterClass)
+			{
+				RemoveIdx = OfferSourceRosterIndex;
+			}
+		}
+		// 2) Sinon chercher par identifiant/clé stable.
+		if (RemoveIdx == INDEX_NONE)
+		{
+			for (int32 i = 0; i < NPCStaffRosterOffers.Num(); ++i)
+			{
+				const FTheHouseNPCStaffRosterOffer& O = NPCStaffRosterOffers[i];
+				if (O.OfferIndexInRoster == OfferCopy.OfferIndexInRoster && O.CharacterClass == OfferCopy.CharacterClass)
+				{
+					RemoveIdx = i;
+					break;
+				}
+			}
+		}
+		if (RemoveIdx != INDEX_NONE)
+		{
+			NPCStaffRosterOffers.RemoveAt(RemoveIdx);
+			bConsumedFromRoster = true;
+		}
+	}
+
+	// Si on vient de consommer la dernière offre, régénérer pour éviter une liste vide.
+	if (bConsumedFromRoster && NPCStaffRosterOffers.Num() == 0 && NPCStaffRecruitmentPool.Num() > 0)
+	{
+		RefreshNPCStaffRecruitmentOffers();
+	}
+	else
+	{
+		RefreshRTSMainWidget();
+	}
 }
 
 void ATheHousePlayerController::ConfirmPlacement()
@@ -4128,6 +4617,12 @@ void ATheHousePlayerController::SetMoney(int32 NewMoney)
 	RefreshRTSMainWidget();
 }
 
+void ATheHousePlayerController::SetStoredPlaceableStacks(const TArray<FTheHouseStoredStack>& NewStacks)
+{
+	StoredPlaceableStacks = NewStacks;
+	RefreshRTSMainWidget();
+}
+
 int32 ATheHousePlayerController::GetPurchasePriceForClass(TSubclassOf<ATheHouseObject> ObjectClass) const
 {
 	if (!ObjectClass)
@@ -4441,16 +4936,26 @@ void ATheHousePlayerController::GatherNPCOrderActionsOnNPC_Implementation(
 	ATheHouseNPCCharacter* TargetNPC,
 	TArray<FTheHouseRTSContextMenuOptionDef>& OutOptionDefs)
 {
+	// Règles "garde" :
+	// - Les options ne sont proposées que si au moins un garde est sélectionné.
+	// - "Attaquer" nécessite au moins un garde sélectionné différent de la cible et déjà possédé
+	//   par un ATheHouseNPCAIController (pour recevoir l'ordre).
 	bool bAnyGuardSelected = false;
+	bool bHasGuardIssuerNotTarget = false;
 	{
 		TArray<ATheHouseNPCCharacter*> Selected;
 		GetSelectedNPCsForRTSOrders(Selected);
 		for (ATheHouseNPCCharacter* N : Selected)
 		{
-			if (IsValid(N) && N->IsStaffGuardNPC())
+			if (!IsValid(N))
 			{
-				bAnyGuardSelected = true;
-				break;
+				continue;
+			}
+			const bool bIsGuard = N->IsStaffGuardNPC();
+			bAnyGuardSelected = bAnyGuardSelected || bIsGuard;
+			if (bIsGuard && N != TargetNPC && Cast<ATheHouseNPCAIController>(N->GetController()) != nullptr)
+			{
+				bHasGuardIssuerNotTarget = true;
 			}
 		}
 	}
@@ -4464,20 +4969,6 @@ void ATheHousePlayerController::GatherNPCOrderActionsOnNPC_Implementation(
 			Eject.OptionId = FName(TEXT("GuardEjectCustomerFromZone"));
 			Eject.Label = FText::FromString(TEXT("Éjecter de la zone (client)"));
 			OutOptionDefs.Add(Eject);
-		}
-
-		bool bHasGuardIssuerNotTarget = false;
-		{
-			TArray<ATheHouseNPCCharacter*> Selected;
-			GetSelectedNPCsForRTSOrders(Selected);
-			for (ATheHouseNPCCharacter* N : Selected)
-			{
-				if (IsValid(N) && N->IsStaffGuardNPC() && N != TargetNPC)
-				{
-					bHasGuardIssuerNotTarget = true;
-					break;
-				}
-			}
 		}
 
 		if (bHasGuardIssuerNotTarget)

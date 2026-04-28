@@ -289,6 +289,15 @@ public:
     void RotateCamera(float Value);
     void LookUp(float Value);
 
+    /** Actions TheHouseFPS* — touches modifiables dans Project Settings → Input ou via UInputSettings (écran options). */
+    void Input_FPSJumpPressed();
+    void Input_FPSJumpReleased();
+    void Input_FPSRunPressed();
+    void Input_FPSRunReleased();
+    void Input_FPSCrouchPressed();
+    void Input_FPSCrouchReleased();
+    void Input_FPSFirePressed();
+
     // =========================================================
     // SELECTION (RTS)
     // =========================================================
@@ -338,6 +347,10 @@ public:
     /** Stock par type (quantités). Accessible aussi en BP via la propriété StoredPlaceableStacks. */
     const TArray<FTheHouseStoredStack>& GetStoredPlaceableStacks() const { return StoredPlaceableStacks; }
 
+	/** Remplace le stock (Load / debug). Rafraîchit l’UI RTS. */
+	UFUNCTION(BlueprintCallable, Category="TheHouse|RTS|Stock")
+	void SetStoredPlaceableStacks(const TArray<FTheHouseStoredStack>& NewStacks);
+
     const TArray<FTheHouseRTSContextMenuOptionDef>& GetRTSContextMenuOptionDefs() const { return RTSContextMenuOptionDefs; }
 
     /** Lignes du menu contextuel PNJ (WBP dérivé de UTheHouseNPCRTSContextMenuUMGWidget). */
@@ -376,6 +389,48 @@ public:
     /** Fixe l’argent du joueur (≥ 0) et rafraîchit l’UI RTS. */
     UFUNCTION(BlueprintCallable, Category="TheHouse|Economy")
     void SetMoney(int32 NewMoney);
+
+    // =========================================================
+    // IN-GAME TIME (DAY/NIGHT) + PAYROLL
+    // =========================================================
+    /** Horloge in-game : 1 journée (24h) correspond à cette durée IRL (secondes). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|Time", meta=(ClampMin="1.0", UIMin="1.0"))
+    float InGameDayLengthRealSeconds = 900.f; // 15 min = 1 journée
+
+    /** Heures par jour (fixe). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|Time", meta=(ClampMin="1.0", ClampMax="48.0"))
+    float InGameHoursPerDay = 24.f;
+
+    /** Jours par “mois” pour convertir un salaire mensuel en salaire journalier. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|Economy|Payroll", meta=(ClampMin="1", ClampMax="60"))
+    int32 PayrollDaysPerMonth = 30;
+
+    /** Si true, prélève automatiquement les salaires des employés une fois par jour in-game (après 24h de travail). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|Economy|Payroll")
+    bool bEnableDailyStaffPayroll = true;
+
+    /** Affichage : texte “Jour X · HH:MM”. */
+    UFUNCTION(BlueprintPure, Category="TheHouse|Time")
+    FText GetInGameClockText() const;
+
+    /** Affichage : progression [0..1) dans la journée. */
+    UFUNCTION(BlueprintPure, Category="TheHouse|Time")
+    float GetInGameDayProgress01() const;
+
+    UFUNCTION(BlueprintPure, Category="TheHouse|Time")
+    int32 GetInGameDayIndex() const { return InGameDayIndex; }
+
+	/** Temps in-game absolu (secondes) depuis le début de la simulation (peut dépasser 1 jour). */
+	UFUNCTION(BlueprintPure, Category="TheHouse|Time")
+	float GetInGameTimeSeconds() const { return InGameTimeSeconds; }
+
+	/**
+	 * Restaure l’horloge in-game (pour Load). Redémarre le timer si nécessaire.
+	 * @param NewInGameTimeSeconds secondes in-game (>=0)
+	 * @param NewDayIndex jour courant (>=0) ; si incohérent avec NewInGameTimeSeconds, l’index sera recalculé.
+	 */
+	UFUNCTION(BlueprintCallable, Category="TheHouse|Time")
+	void SetInGameClockState(float NewInGameTimeSeconds, int32 NewDayIndex);
 
     /** Prix catalogue : lu sur le CDO de la classe d’objet (PurchasePrice). */
     UFUNCTION(BlueprintPure, Category="TheHouse|Economy")
@@ -441,6 +496,16 @@ public:
     UFUNCTION(BlueprintCallable, Category="TheHouse|RTS|NPC|Recruitment")
     void RefreshNPCStaffRecruitmentOffers();
 
+    /** Vide le bassin (règles) puis regénère roster + UI. */
+    UFUNCTION(BlueprintCallable, Category="TheHouse|RTS|NPC|Recruitment")
+    void ClearNPCStaffRecruitmentPoolSlots();
+
+    /**
+     * Ajoute une règle au bassin. Si `bRebuildRosterAndUi` est false, enchaîne plusieurs ajouts puis appelle une fois `RefreshNPCStaffRecruitmentOffers`.
+     */
+    UFUNCTION(BlueprintCallable, Category="TheHouse|RTS|NPC|Recruitment", meta=(AdvancedDisplay="bRebuildRosterAndUi"))
+    void AddNPCStaffRecruitmentPoolSlot(const FTheHouseNPCStaffPoolSlotDef& Slot, bool bRebuildRosterAndUi = true);
+
     /** Démarre la prévisualisation de pose d’un staff (annule la prévisualisation d’objet si besoin). */
     UFUNCTION(BlueprintCallable, Category="TheHouse|RTS|NPC|Palette")
     void StartStaffNpcPlacementFromPalette(TSubclassOf<ATheHouseNPCCharacter> NPCClass, int32 HireCost = 0);
@@ -448,6 +513,16 @@ public:
     /** Prévisualisation à partir d’une ligne du roster (`NPCStaffRosterOffers`). */
     UFUNCTION(BlueprintCallable, Category="TheHouse|RTS|NPC|Recruitment")
     void StartStaffNpcPlacementFromRosterOffer(int32 RosterOfferIndex);
+
+    /** Panneau recrutement : None = liste des métiers ; sinon filtre sur `FTheHouseNPCStaffRosterOffer::StaffCategoryId`. Réinitialisé au refresh du roster. */
+    UFUNCTION(BlueprintPure, Category="TheHouse|RTS|NPC|Recruitment")
+    FName GetStaffUiRosterBrowseCategoryId() const { return StaffUiRosterBrowseCategoryId; }
+
+    UFUNCTION(BlueprintCallable, Category="TheHouse|RTS|NPC|Recruitment")
+    void StaffUiSetRosterCategoryFilter(FName CategoryId);
+
+    UFUNCTION(BlueprintCallable, Category="TheHouse|RTS|NPC|Recruitment")
+    void StaffUiClearRosterCategoryFilter();
 
 protected:
 
@@ -467,10 +542,17 @@ protected:
     UPROPERTY()
     FTheHouseNPCStaffRosterOffer PendingStaffSpawnOffer;
 
+	/** Si >= 0 : l’offre vient de `NPCStaffRosterOffers[PendingStaffSpawnOfferRosterIndex]` (consommation au confirm). */
+	UPROPERTY()
+	int32 PendingStaffSpawnOfferRosterIndex = INDEX_NONE;
+
     UPROPERTY()
     ATheHouseNPCCharacter* StaffPlacementPreviewNpc = nullptr;
 
     bool bStaffNpcPlacementLocationValid = false;
+
+    /** Réentrance / double-chemin même frame — évite deux spawns live sur un seul clic. */
+    bool bStaffNpcConfirmInFlight = false;
 
     void ConfigureStaffNpcDeferredFromOffer(ATheHouseNPCCharacter* Npc, const FTheHouseNPCStaffRosterOffer& Offer) const;
 
@@ -481,6 +563,30 @@ protected:
     bool ValidatePlacement(const FHitResult& Hit) const;
 
     void ConfirmStaffNpcPlacement();
+
+	// =========================================================
+	// RECRUITMENT (ROSTER) RUNTIME
+	// =========================================================
+	void TheHouse_StartRecruitmentAutoRefreshTimerIfNeeded();
+	void TheHouse_OnRecruitmentAutoRefreshTimer();
+	FTimerHandle TheHouseRecruitmentRefreshTimer;
+
+	// =========================================================
+	// IN-GAME TIME + PAYROLL (RUNTIME)
+	// =========================================================
+	void TheHouse_StartInGameClockTimerIfNeeded();
+	void TheHouse_OnInGameClockTick();
+	void TheHouse_HandleNewInGameDay();
+	FTimerHandle TheHouseInGameClockTimer;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="TheHouse|Time")
+	float InGameTimeSeconds = 0.f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="TheHouse|Time")
+	int32 InGameDayIndex = 0;
+
+	UPROPERTY()
+	int32 InGameLastProcessedDayIndex = 0;
 
     /** Au moins un acteur dans RTSSelectedActors différent de Exclude (pour menus ordres sur PNJ). */
     bool HasRTSSelectionActorOtherThan(const AActor* Exclude) const;
@@ -537,9 +643,10 @@ protected:
     /** Front LMB (RTS) : même raison que RMB — PlayerInput / BindAction peuvent ne pas voir le clic en Game+UI. */
     bool bPrevPollLMBHeld = false;
 
-    /** Anti double press/release quand BindAction et le poll déclenchent le même front dans le même instant monde. */
-    double LastRtsLmbSelectPressDedupeTimeSeconds = -1.0;
-    double LastRtsLmbSelectReleaseDedupeTimeSeconds = -1.0;
+    /** Anti double press/release : poll 120 Hz + BindAction « Select » sur le même front (aligné sur `GFrameCounter` UE 5.7+ = uint64). */
+    static constexpr uint64 TheHouse_InvalidRtsLmbFrame = 0xFFFFFFFFFFFFFFFFull;
+    uint64 LastRtsLmbSelectPressFrame = TheHouse_InvalidRtsLmbFrame;
+    uint64 LastRtsLmbSelectReleaseFrame = TheHouse_InvalidRtsLmbFrame;
 
     /** Après un choix dans le menu ordres (UMG), le relâchement LMB peut arriver une fois le menu fermé : sans cela, Input_SelectReleased appelle RTS_DeselectAll(). */
     bool bRtsSuppressNextSelectReleaseWorldPick = false;
@@ -606,7 +713,8 @@ protected:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera System|Debug")
     bool bDebugLogRTSZoom = false;
 
-    UPROPERTY(EditDefaultsOnly, Category="FPS")
+    /** Subclass to spawn when entering FPS (e.g. BP child with skeletal mesh + AnimBP). Capsule-only world collision is applied on the pawn unless disabled on the character. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="FPS", meta=(DisplayName="FPS Character Class"))
     TSubclassOf<class ATheHouseFPSCharacter> FPSCharacterClass;
 
     // =========================================================
@@ -646,13 +754,29 @@ protected:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|UI|RTS|NPC|Palette")
     TArray<FTheHouseNPCStaffPaletteEntry> NPCStaffPalette;
 
-    /** Bassin recrutement : à chaque `RefreshNPCStaffRecruitmentOffers`, remplit `NPCStaffRosterOffers`. */
+    /**
+     * Bassin = **règles** (types de postes, archetypes, plages salaire, combien d’offres par refresh).
+     * Ce n’est pas la liste affichée : celle-ci est `NPCStaffRosterOffers`, regénérée aléatoirement par `RefreshNPCStaffRecruitmentOffers`.
+     * Tu peux modifier ce tableau à l’exécution (BP/C++) puis appeler `RefreshNPCStaffRecruitmentOffers` sur un timer ou un événement.
+     */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|UI|RTS|NPC|Recruitment")
     TArray<FTheHouseNPCStaffPoolSlotDef> NPCStaffRecruitmentPool;
+
+	/** Si true, un timer régénère automatiquement le roster à intervalle fixe (recrutement “vivant”). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|UI|RTS|NPC|Recruitment")
+	bool bAutoRefreshNPCStaffRecruitmentRoster = false;
+
+	/** Intervalle (secondes) entre deux refresh auto. 0 = désactivé. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|UI|RTS|NPC|Recruitment", meta=(ClampMin="0.0", UIMin="0.0"))
+	float NPCStaffRecruitmentAutoRefreshIntervalSeconds = 60.f;
 
     /** Offres courantes affichées dans le panneau Personnel (prioritaire sur la palette statique). */
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="TheHouse|UI|RTS|NPC|Recruitment")
     TArray<FTheHouseNPCStaffRosterOffer> NPCStaffRosterOffers;
+
+    /** État UI du panneau recrutement (navigation par métier). */
+    UPROPERTY(Transient, BlueprintReadOnly, Category="TheHouse|UI|RTS|NPC|Recruitment")
+    FName StaffUiRosterBrowseCategoryId = NAME_None;
 
     /** Stock par type : quantité décrémentée quand un objet issu du stock est replacé et confirmé. */
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="TheHouse|UI|RTS")
@@ -736,6 +860,9 @@ protected:
     void CloseRTSContextMenu();
     void ClosePlacedObjectSettingsWidget();
     void OpenPlacedObjectSettingsWidgetFor(ATheHouseObject* Obj);
+
+	/** Ferme uniquement les UI modales RTS (menus contextuels + panneau paramètres). */
+	void CloseRtsModalUi(bool bClosePlacedObjectSettings = true);
 
     FVector2D TheHouse_GetContextMenuViewportPosition() const;
     void TheHouse_OpenRTSContextMenuShared(ATheHouseObject* Obj, const FVector2D& MenuScreenPos);

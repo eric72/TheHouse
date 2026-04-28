@@ -180,6 +180,13 @@ ATheHouseNPCCharacter + ATheHouseNPCAIController → PNJ (pas le PlayerControlle
 
       <h2 id="fps">Personnage FPS</h2>
       <p><code>ATheHouseFPSCharacter</code> : <code>ACharacter</code> + <code>ITheHouseSelectable</code>. <code>bCanBeSelected</code> pour désactiver la sélection RTS.</p>
+      <ul>
+        <li><strong>Contrôles FPS</strong> (remappables) : <code>TheHouseFPSJump</code>, <code>TheHouseFPSRun</code>, <code>TheHouseFPS_Crouch</code>, <code>TheHouseFPSFire</code>.</li>
+        <li><strong>Caméra sur tête</strong> : socket (ex. <code>HeadCameraEmplacement</code>) + anti-clipping (cache tête/nuque pour le joueur local).</li>
+        <li><strong>Animation locomotion</strong> : <code>UTheHouseLocomotionAnimInstance</code> (Speed/Direction, états air/landing, AimOffset yaw/pitch).</li>
+        <li><strong>PV &amp; mort</strong> : <code>UTheHouseHealthComponent</code> (ApplyDamage), ragdoll auto.</li>
+        <li><strong>Combat</strong> : <code>ATheHouseWeapon</code> + <code>ATheHouseProjectile</code> (muzzle socket <code>Muzzle</code>), fallback hitscan.</li>
+      </ul>
 
       <h2 id="hud">HUD</h2>
       <p><code>ATheHouseHUD</code> dessine le rectangle. La résolution des acteurs sélectionnés est dans le PlayerController.</p>

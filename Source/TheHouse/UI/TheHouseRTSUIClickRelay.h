@@ -23,7 +23,11 @@ enum class ETheHouseRTSUIClickKind : uint8
 	/** Ordre : PNJ sélectionnés + sol sous le curseur. */
 	ContextNPCOrderOnGround,
 	/** Palette personnel : prévisualisation / pose d’un PNJ staff (clic sur une ligne du panneau). */
-	StaffPalette
+	StaffPalette,
+	/** Choisir une catégorie de métier (panneau recrutement). */
+	StaffRecruitmentPickCategory,
+	/** Revenir à la liste des métiers. */
+	StaffRecruitmentBackToCategories
 };
 
 /**
@@ -67,6 +71,10 @@ public:
 	/** Si ≥ 0 : indice dans `ATheHousePlayerController::NPCStaffRosterOffers` ; sinon réglage palette legacy (`StaffNPCClass`). */
 	UPROPERTY(Transient)
 	int32 StaffRosterOfferIndex = INDEX_NONE;
+
+	/** Utilisé avec `StaffRecruitmentPickCategory` (id de catégorie = `FTheHouseNPCStaffRosterOffer::StaffCategoryId`). */
+	UPROPERTY(Transient)
+	FName StaffRecruitmentCategoryId = NAME_None;
 
 	UFUNCTION()
 	void RelayClicked();
