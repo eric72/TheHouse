@@ -246,6 +246,7 @@ ATheHouseNPCCharacter + ATheHouseNPCAIController → PNJ (pas le PlayerControlle
         <li>Double chemin molette en plus du GameViewportClient.</li>
         <li>Surfaces trop pentues ou pas de hit sous le curseur → placement invalide.</li>
         <li>Le panneau paramètres “ne s’ouvre pas” : vérifier <code>PlacedObjectSettingsWidgetClass</code> sur le PlayerController BP, la collision <code>Visibility</code> de l’objet, puis <code>bOpenParametersPanelOnLeftClick</code> sur le BP de l’objet.</li>
+        <li>Cycle jour/nuit : si <code>InGameTimeSeconds</code> démarre à 0, alors <code>DayProgress01=0</code> (minuit) et le soleil peut être coupé (scène noire sans <code>SkyLight</code> / <code>MoonLight</code>). Voir <code>Docs/Features/RTS_UI/README.md</code> → Cycle jour/nuit.</li>
       </ol>
 
       <h2 id="localisation">Localisation (pipeline complet)</h2>

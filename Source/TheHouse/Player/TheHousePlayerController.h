@@ -189,6 +189,7 @@
 #include "Placement/TheHousePlacementTypes.h"
 #include "UI/TheHouseRTSUITypes.h"
 #include "UI/TheHousePlacedObjectSettingsWidget.h"
+#include "UI/TheHouseSettingsMenuWidget.h"
 #include "TheHousePlayerController.generated.h"
 
 class ATheHouseCameraPawn;
@@ -254,6 +255,13 @@ public:
 
     UFUNCTION(BlueprintCallable, Exec, Category = "Camera System")
     void DebugSwitchToFPS();
+
+    /** Action TheHouseToggleGraphicsProfile (défaut F10) : bascule profil graphique Low/High. */
+    void Input_ToggleGraphicsProfile();
+
+    /** Console : TheHouse_SetGraphicsProfile 0|1 (1 = High, ignoré en Shipping). */
+    UFUNCTION(Exec, Category = "TheHouse|Graphics")
+    void TheHouse_SetGraphicsProfile(int32 ProfileIndex);
 
     // =========================================================
     // INPUT DEBUG / RTS
@@ -401,6 +409,13 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|Time", meta=(ClampMin="1.0", ClampMax="48.0"))
     float InGameHoursPerDay = 24.f;
 
+    /**
+     * Progression de départ [0..1] appliquée seulement si aucune heure n'a encore été restaurée (nouvelle partie).
+     * Exemple: 0.25 = matin, 0.5 = midi.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|Time", meta=(ClampMin="0.0", ClampMax="1.0"))
+    float InitialInGameDayProgress01 = 0.25f;
+
     /** Jours par “mois” pour convertir un salaire mensuel en salaire journalier. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|Economy|Payroll", meta=(ClampMin="1", ClampMax="60"))
     int32 PayrollDaysPerMonth = 30;
@@ -425,7 +440,7 @@ public:
 	float GetInGameTimeSeconds() const { return InGameTimeSeconds; }
 
 	/**
-	 * Restaure l’horloge in-game (pour Load). Redémarre le timer si nécessaire.
+	 * Restaure l’horloge in-game (pour Load). Réactive l’avance du temps si nécessaire.
 	 * @param NewInGameTimeSeconds secondes in-game (>=0)
 	 * @param NewDayIndex jour courant (>=0) ; si incohérent avec NewInGameTimeSeconds, l’index sera recalculé.
 	 */
@@ -575,9 +590,11 @@ protected:
 	// IN-GAME TIME + PAYROLL (RUNTIME)
 	// =========================================================
 	void TheHouse_StartInGameClockTimerIfNeeded();
-	void TheHouse_OnInGameClockTick();
+	void TheHouse_AdvanceInGameClock(float DeltaSeconds);
 	void TheHouse_HandleNewInGameDay();
-	FTimerHandle TheHouseInGameClockTimer;
+	/** Horloge avancée chaque frame (Tick) pour jour/nuit fluide ; pas de timer 0,25 s. */
+	bool bTheHouseInGameClockActive = false;
+	bool bTheHouseAppliedInitialClockProgress = false;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="TheHouse|Time")
 	float InGameTimeSeconds = 0.f;
@@ -746,6 +763,10 @@ protected:
     UPROPERTY(EditDefaultsOnly, Category="TheHouse|UI|FPS")
     TSubclassOf<UTheHouseFPSHudWidget> FPSHudWidgetClass;
 
+    /** WBP hérité de UTheHouseSettingsMenuWidget (paramètres graphismes / sons / touches). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="TheHouse|UI|Settings")
+    TSubclassOf<UTheHouseSettingsMenuWidget> TheHouseSettingsMenuWidgetClass;
+
     UPROPERTY(EditDefaultsOnly, Category="TheHouse|UI|RTS")
     TArray<FTheHousePlaceableCatalogEntry> PlaceableCatalog;
 
@@ -842,6 +863,9 @@ protected:
     UPROPERTY(Transient)
     TObjectPtr<UTheHousePlacedObjectSettingsWidget> PlacedObjectSettingsWidgetInstance = nullptr;
 
+    UPROPERTY(Transient)
+    TObjectPtr<UTheHouseSettingsMenuWidget> TheHouseSettingsMenuWidgetInstance = nullptr;
+
     /** Dernière cible liée au panneau paramètres — permet de réutiliser le même WBP même si un BP vidait la cible dans le widget entre deux clics. */
     TWeakObjectPtr<ATheHouseObject> PlacedObjectSettingsLastBoundObject;
 
@@ -863,6 +887,12 @@ protected:
 
 	/** Ferme uniquement les UI modales RTS (menus contextuels + panneau paramètres). */
 	void CloseRtsModalUi(bool bClosePlacedObjectSettings = true);
+
+    UFUNCTION(BlueprintCallable, Category="TheHouse|UI|Settings")
+    void OpenTheHouseSettingsMenu();
+
+    UFUNCTION(BlueprintCallable, Category="TheHouse|UI|Settings")
+    void CloseTheHouseSettingsMenu();
 
     FVector2D TheHouse_GetContextMenuViewportPosition() const;
     void TheHouse_OpenRTSContextMenuShared(ATheHouseObject* Obj, const FVector2D& MenuScreenPos);
@@ -898,6 +928,8 @@ protected:
 
     UFUNCTION()
     void Input_CancelOrCloseRts();
+
+    void Input_TheHouseOpenSettings();
 
     UFUNCTION()
     void Input_RTSObjectContext();

@@ -122,20 +122,30 @@ Un acteur C++ est fourni pour faire bouger le soleil en fonction de `In Game Day
 
 - `ATheHouseDayNightCycleActor` (`Source/TheHouse/Environment/TheHouseDayNightCycleActor.*`)
 
+### Important : “tout noir” au démarrage
+
+Si ton jeu démarre avec `InGameTimeSeconds = 0`, alors `DayProgress01 = 0` (minuit) : le `SunLight` est forcé sous l’horizon et son intensité tombe à 0.  
+Pour éviter un écran complètement noir, assigne un `SkyLight` et une `SkyLightIntensityCurve` qui garde une intensité > 0 la nuit, et/ou active la `MoonLight` (voir ci‑dessous).
+
 ### Mise en place (éditeur)
 
 1. Dans ta carte (ou sous-niveau Lighting), **place** un `TheHouseDayNightCycleActor`.
 2. Dans ses détails, assigne :
    - `SunLight` → ton `DirectionalLight` (le soleil)
+   - (optionnel) `MoonLight` → ton 2e `DirectionalLight` (la lune) + `bEnableMoonLight`
    - optionnel : `SkyLight`, `SkyAtmosphere`, `ExponentialFog`
 3. Ajuste :
    - `SunYaw` (direction est/ouest)
    - `SunPitchAtMidnight` / `SunPitchAtNoon`
    - `SunIntensityLuxAtNoon` (si pas de courbe)
+    - (optionnel) `MoonIntensityLuxAtMidnight` + `MoonLightColorAtNight`
+   - **Crépuscule / chevauchement** : `TwilightSunMoonOverlapDegrees` (la lune peut rester visible un peu pendant que le soleil est encore bas à l’horizon)
+   - **Disque lunaire (visuel)** : `bEnableMoonDiskVisual` + `MoonDiskMaterial` (MID) + option `MoonDiskTexture` (param `MoonTex`) + `MoonDiskDistanceUU` / `MoonDiskScale` / `MoonDiskEmissive`
 4. (Optionnel) Assigne des courbes :
    - `SunIntensityLuxCurve` (0..1 → lux)
    - `SunLightColorCurve` (0..1 → couleur)
    - `SkyLightIntensityCurve`
+    - (optionnel) `MoonIntensityLuxCurve`, `MoonLightColorCurve`
 
 ### Performance
 

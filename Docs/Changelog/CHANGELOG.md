@@ -6,9 +6,14 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/). Les
 
 ## [Non versionné] — en cours
 
+### Modifié
+
+- **Temps in-game :** l’horloge avance désormais **chaque frame** (`Tick`) au lieu d’un pas fixe **0,25 s** ; le cycle jour/nuit (soleil / lune) suit le temps de façon continue.
+
 ### Documentation
 
 - **Passage à jour global :** `GUIDE_EN.md` aligné avec les menus PNJ / ordres (FR) ; arborescence FR/EN enrichie (`Localization/`, `UI/`, `NPCEjectRegionVolume`, `BP_SmartWall`) ; `Docs/PROJECT_OVERVIEW.md` et `Docs/SYSTEMS.md` réécrits ; nouveaux index **`Docs/Features/RTS_UI`**, **`Localization`**, **`NPCWorld`** + table de couverture `Source/` dans `Docs/Features/README.md` ; site `Docs/site/fr|en/index.html` (chemins scripts portables, table arborescence, références) ; exemples localisation sans chemin machine dans les guides.
+- **Jour/nuit :** `ATheHouseDayNightCycleActor` supporte désormais une **lune optionnelle** (`MoonLight`) + courbes d’intensité/couleur ; note “démarrage à minuit = scène noire sans SkyLight/MoonLight” ajoutée à la doc.
 - **PNJ / NPC:** architecture documentée dans `Docs/Developer/GUIDE_FR.md` et `Docs/Developer/GUIDE_EN.md` ; archetypes refactorés en **`NPC/Archetypes/`** (`UTheHouseNPCArchetype` racine + Staff / Customer / Special ; racine non abstraite pour le picker d’assets), **`StaffMonthlySalary`** runtime sur le personnage ; même résumé sur `Docs/site/`.
 - **Localisation :** `Scripts/RunLocalizationStep.ps1` (toutes les étapes dashboard : Gather, Compile, Export/Import PO, dialogue script CSV, import dialogue WAV, rapports) ; guides `GUIDE_FR.md` / `GUIDE_EN.md` et pages `Docs/site/` mises à jour ; `GatherLocalization.ps1` / `CompileLocalization.ps1` délèguent au script maître.
 - **RTS UI :** section *panneau principal (`RTS Main Widget Class`) vs menu contextuel (`RTS Context Menu Widget Class`)* dans `Docs/Developer/GUIDE_FR.md` et `Docs/Developer/GUIDE_EN.md` (table des matières mise à jour).

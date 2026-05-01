@@ -1,4 +1,7 @@
 {
+	// Après ajout de .cpp/.h ou nouveaux dossiers sous Source/TheHouse : exécuter la tâche
+	// « UE: Refresh VS Code / Cursor IntelliSense » (Scripts/RefreshVSCodeIntellisense.ps1), puis
+	// Command Palette : C/C++: Reset IntelliSense Database → Developer: Reload Window.
 	"C_Cpp.default.compileCommands": "${workspaceFolder}/.vscode/compileCommands_TheHouse.json",
 	"C_Cpp.default.cppStandard": "c++20",
 	"C_Cpp.default.cStandard": "c17",

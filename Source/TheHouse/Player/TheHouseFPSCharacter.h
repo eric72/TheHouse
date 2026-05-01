@@ -31,6 +31,13 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = Camera)
 	UCameraComponent* FPSCameraComponent;
 
+	/**
+	 * Local-only shadow proxy used when hiding head bones in FPS.
+	 * Hiding bones does not cast shadow; this mesh stays hidden but still casts shadow.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="TheHouse|FPS|Camera")
+	TObjectPtr<USkeletalMeshComponent> OwnerHiddenShadowProxyMesh;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="TheHouse|Health")
 	TObjectPtr<UTheHouseHealthComponent> HealthComponent;
 

@@ -1,5 +1,6 @@
 # Regenerates VS Code / Cursor C++ IntelliSense files (compileCommands_*.json, c_cpp_properties.json)
 # via UnrealBuildTool. Safe to run on any machine after clone — uses EngineAssociation from TheHouse.uproject.
+# À relancer après ajout de fichiers/dossiers sous Source/TheHouse (sinon squiggles / includes introuvables dans l’IDE).
 #
 # Optional environment variables (first match wins):
 #   UE_ENGINE_ROOT, UNREAL_ENGINE_ROOT — folder that contains Engine\ (e.g. C:\Program Files\Epic Games\UE_5.7)

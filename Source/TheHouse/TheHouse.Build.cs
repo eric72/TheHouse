@@ -38,6 +38,8 @@ public class TheHouse : ModuleRules
 			"TheHouse/Combat",
 			"TheHouse/Environment"
 			,"TheHouse/Save"
+			,"TheHouse/Graphics"
+			,"TheHouse/Settings"
 		});
 
 		// Uncomment if you are using Slate UI

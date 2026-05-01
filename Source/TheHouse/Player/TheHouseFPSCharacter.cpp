@@ -26,6 +26,18 @@ ATheHouseFPSCharacter::ATheHouseFPSCharacter()
 	FPSCameraComponent->SetRelativeLocation(FPSCameraCapsuleRelativeLocation);
 	FPSCameraComponent->bUsePawnControlRotation = true;
 
+	OwnerHiddenShadowProxyMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("OwnerHiddenShadowProxyMesh"));
+	OwnerHiddenShadowProxyMesh->SetupAttachment(GetMesh());
+	OwnerHiddenShadowProxyMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	OwnerHiddenShadowProxyMesh->SetGenerateOverlapEvents(false);
+	// Keep "visible" so it can render into shadow passes; hide it via HiddenInGame + CastHiddenShadow.
+	OwnerHiddenShadowProxyMesh->SetVisibility(true, true);
+	OwnerHiddenShadowProxyMesh->SetHiddenInGame(true, true);
+	OwnerHiddenShadowProxyMesh->SetCastShadow(true);
+	OwnerHiddenShadowProxyMesh->bCastHiddenShadow = true;
+	OwnerHiddenShadowProxyMesh->SetComponentTickEnabled(false);
+	OwnerHiddenShadowProxyMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPose;
+
 	HealthComponent = CreateDefaultSubobject<UTheHouseHealthComponent>(TEXT("HealthComponent"));
 
 	if (UCharacterMovementComponent* Move = GetCharacterMovement())
@@ -151,6 +163,24 @@ void ATheHouseFPSCharacter::RefreshFPSCameraAttachment()
 		const bool bApplyOwnerHiding = bHideMeshForOwnerInFPS && bLocal && bCameraFollowsCharacterHead;
 
 		Skel->SetOwnerNoSee(bApplyOwnerHiding && bHideFullBodyMeshForOwnerInFPS);
+		// When hiding bones or using OwnerNoSee for FPS anti-clipping, keep shadows to avoid “headless shadow”.
+		Skel->bCastHiddenShadow = bApplyOwnerHiding;
+		Skel->SetCastShadow(true);
+
+		// Bone hiding does not cast shadow. Use a hidden proxy mesh that still casts shadow for the local player.
+		if (OwnerHiddenShadowProxyMesh)
+		{
+			OwnerHiddenShadowProxyMesh->SetSkeletalMesh(Skel->GetSkeletalMeshAsset());
+			OwnerHiddenShadowProxyMesh->SetLeaderPoseComponent(Skel);
+			OwnerHiddenShadowProxyMesh->VisibilityBasedAnimTickOption = bApplyOwnerHiding
+				? EVisibilityBasedAnimTickOption::AlwaysTickPose
+				: EVisibilityBasedAnimTickOption::OnlyTickPoseWhenRendered;
+			OwnerHiddenShadowProxyMesh->SetHiddenInGame(true, true);
+			OwnerHiddenShadowProxyMesh->SetVisibility(true, true);
+			OwnerHiddenShadowProxyMesh->SetOwnerNoSee(false);
+			OwnerHiddenShadowProxyMesh->SetCastShadow(bApplyOwnerHiding);
+			OwnerHiddenShadowProxyMesh->bCastHiddenShadow = bApplyOwnerHiding;
+		}
 
 		// Reset d'abord : si on quitte le FPS ou si on toggle le bool en runtime, il faut réafficher.
 		if (!bApplyOwnerHiding || !bHideOnlyHeadBonesForOwnerInFPS)
@@ -170,6 +200,17 @@ void ATheHouseFPSCharacter::RefreshFPSCameraAttachment()
 				if (!Bone.IsNone())
 				{
 					Skel->HideBoneByName(Bone, EPhysBodyOp::PBO_None);
+				}
+			}
+			// Ensure the shadow proxy keeps the full silhouette (including head).
+			if (OwnerHiddenShadowProxyMesh)
+			{
+				for (const FName& Bone : OwnerHiddenBonesInFPS)
+				{
+					if (!Bone.IsNone())
+					{
+						OwnerHiddenShadowProxyMesh->UnHideBoneByName(Bone);
+					}
 				}
 			}
 		}

@@ -1,6 +1,8 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "TheHousePlayerController.h"
+
+#include "TheHouseGraphicsProfileSubsystem.h"
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/SlateBlueprintLibrary.h"
 #include "Blueprint/WidgetLayoutLibrary.h"
@@ -29,6 +31,7 @@
 #include "UI/TheHouseRTSContextMenuWidget.h"
 #include "UI/TheHouseRTSContextMenuUMGWidget.h"
 #include "UI/TheHouseRTSMainWidget.h"
+#include "UI/TheHouseSettingsMenuWidget.h"
 #include "UI/TheHouseRTSUITypes.h"
 #include "TheHouse/Core/TheHouseHUD.h"
 #include "TheHouse/Core/TheHouseSelectable.h"
@@ -148,7 +151,8 @@ static bool TheHouse_LeafUmgBlocksWorldForRtsPanels(
 	const UTheHousePlacedObjectSettingsWidget* Settings,
 	const UUserWidget* RTSOrderObjContext,
 	const UUserWidget* RTSOrderNpcContext,
-	const UUserWidget* RTSOrderGroundContext)
+	const UUserWidget* RTSOrderGroundContext,
+	const UTheHouseSettingsMenuWidget* TheHouseSettingsMenu)
 {
 	if (!Leaf)
 	{
@@ -169,8 +173,11 @@ static bool TheHouse_LeafUmgBlocksWorldForRtsPanels(
 		RTSOrderNpcContext && Leaf->GetTypedOuter<UUserWidget>() == RTSOrderNpcContext;
 	const bool bInOrderGround =
 		RTSOrderGroundContext && Leaf->GetTypedOuter<UUserWidget>() == RTSOrderGroundContext;
+	const bool bInTheHouseSettings =
+		TheHouseSettingsMenu && Leaf->GetTypedOuter<UTheHouseSettingsMenuWidget>() == TheHouseSettingsMenu;
 
-	if (!bInMain && !bInContext && !bInNPCContext && !bInSettings && !bInOrderObj && !bInOrderNpc && !bInOrderGround)
+	if (!bInMain && !bInContext && !bInNPCContext && !bInSettings && !bInOrderObj && !bInOrderNpc && !bInOrderGround
+		&& !bInTheHouseSettings)
 	{
 		return false;
 	}
@@ -187,7 +194,8 @@ static bool TheHouse_SlatePathBlocksRtsWorldSelection(
 	const UTheHousePlacedObjectSettingsWidget* Settings,
 	const UUserWidget* RTSOrderObjContext,
 	const UUserWidget* RTSOrderNpcContext,
-	const UUserWidget* RTSOrderGroundContext)
+	const UUserWidget* RTSOrderGroundContext,
+	const UTheHouseSettingsMenuWidget* TheHouseSettingsMenu)
 {
 	if (!Path.IsValid() || Path.Widgets.Num() == 0)
 	{
@@ -224,7 +232,8 @@ static bool TheHouse_SlatePathBlocksRtsWorldSelection(
 					Settings,
 					RTSOrderObjContext,
 					RTSOrderNpcContext,
-					RTSOrderGroundContext))
+					RTSOrderGroundContext,
+					TheHouseSettingsMenu))
 			{
 				return true;
 			}
@@ -540,13 +549,14 @@ void ATheHousePlayerController::TheHouse_StartInputPollTimer() {
 
 void ATheHousePlayerController::EndPlay(
     const EEndPlayReason::Type EndPlayReason) {
-  if (GetWorld()) {
+	if (GetWorld()) {
     GetWorldTimerManager().ClearTimer(TheHouseInputPollTimer);
 	GetWorldTimerManager().ClearTimer(TheHouseRecruitmentRefreshTimer);
-	GetWorldTimerManager().ClearTimer(TheHouseInGameClockTimer);
   }
+	bTheHouseInGameClockActive = false;
 
   CloseRTSContextMenu();
+  CloseTheHouseSettingsMenu();
   if (RTSMainWidgetInstance)
   {
     RTSMainWidgetInstance->RemoveFromParent();
@@ -567,36 +577,41 @@ void ATheHousePlayerController::TheHouse_StartInGameClockTimerIfNeeded()
 	{
 		return;
 	}
-	GetWorldTimerManager().ClearTimer(TheHouseInGameClockTimer);
 
 	InGameTimeSeconds = FMath::Max(0.f, InGameTimeSeconds);
 	InGameDayIndex = FMath::Max(0, InGameDayIndex);
+
+	// New game safety: avoid always starting at midnight (black scene) when no save restored the clock yet.
+	if (!bTheHouseAppliedInitialClockProgress && InGameTimeSeconds <= KINDA_SMALL_NUMBER && InGameDayIndex == 0)
+	{
+		const float DayLen = FMath::Max(1.f, InGameDayLengthRealSeconds);
+		const float InitialProgress = FMath::Clamp(InitialInGameDayProgress01, 0.f, 1.f);
+		InGameTimeSeconds = DayLen * InitialProgress;
+		InGameDayIndex = FMath::FloorToInt(InGameTimeSeconds / DayLen);
+		bTheHouseAppliedInitialClockProgress = true;
+	}
+
 	InGameLastProcessedDayIndex = InGameDayIndex;
 
-	// Tick horloge 4×/sec : assez fluide pour une barre, léger.
-	GetWorldTimerManager().SetTimer(
-		TheHouseInGameClockTimer,
-		this,
-		&ATheHousePlayerController::TheHouse_OnInGameClockTick,
-		0.25f,
-		/*bLoop*/ true);
+	// Avance fluide dans Tick (jour/nuit, barres de progression) ; pas de pas discret 0,25 s.
+	bTheHouseInGameClockActive = true;
 }
 
-void ATheHousePlayerController::TheHouse_OnInGameClockTick()
+void ATheHousePlayerController::TheHouse_AdvanceInGameClock(float DeltaSeconds)
 {
 	UWorld* World = GetWorld();
-	if (!World)
+	if (!World || !bTheHouseInGameClockActive)
 	{
 		return;
 	}
 
 	const float DayLen = FMath::Max(1.f, InGameDayLengthRealSeconds);
-	InGameTimeSeconds += 0.25f;
+	InGameTimeSeconds += DeltaSeconds;
 
-	const int32 NewDay = FMath::FloorToInt(InGameTimeSeconds / DayLen);
-	if (NewDay != InGameDayIndex)
+	const int32 TargetDay = FMath::Max(0, FMath::FloorToInt(InGameTimeSeconds / DayLen));
+	while (InGameDayIndex < TargetDay)
 	{
-		InGameDayIndex = FMath::Max(0, NewDay);
+		++InGameDayIndex;
 		TheHouse_HandleNewInGameDay();
 	}
 
@@ -706,6 +721,7 @@ float ATheHousePlayerController::GetInGameDayProgress01() const
 void ATheHousePlayerController::SetInGameClockState(const float NewInGameTimeSeconds, const int32 NewDayIndex)
 {
 	InGameTimeSeconds = FMath::Max(0.f, NewInGameTimeSeconds);
+	bTheHouseAppliedInitialClockProgress = true;
 
 	const float DayLen = FMath::Max(1.f, InGameDayLengthRealSeconds);
 	const int32 DerivedDay = FMath::Max(0, FMath::FloorToInt(InGameTimeSeconds / DayLen));
@@ -793,6 +809,11 @@ void ATheHousePlayerController::OnPossess(APawn *InPawn) {
 
 void ATheHousePlayerController::Tick(float DeltaTime) {
   Super::Tick(DeltaTime);
+  // If a BP overrides BeginPlay without calling Parent, the in-game clock may never get activated.
+  if (GetWorld() && !bTheHouseInGameClockActive) {
+    TheHouse_StartInGameClockTimerIfNeeded();
+  }
+  TheHouse_AdvanceInGameClock(DeltaTime);
   // Secours si BeginPlay/ReceivedPlayer n’ont pas lancé le timer (BP sans
   // Super, ordre d’init).
   if (GetWorld() && Cast<ULocalPlayer>(Player) &&
@@ -1029,6 +1050,16 @@ void ATheHousePlayerController::SetupInputComponent() {
   InputComponent->BindAction("DebugToggleFPS", IE_Pressed, this,
                              &ATheHousePlayerController::DebugSwitchToFPS);
   InputComponent->BindAction(
+      "TheHouseToggleGraphicsProfile",
+      IE_Pressed,
+      this,
+      &ATheHousePlayerController::Input_ToggleGraphicsProfile);
+  InputComponent->BindAction(
+      "TheHouseOpenSettings",
+      IE_Pressed,
+      this,
+      &ATheHousePlayerController::Input_TheHouseOpenSettings);
+  InputComponent->BindAction(
       "RotateModifier", IE_Pressed, this,
       &ATheHousePlayerController::OnRotateModifierPressed);
   InputComponent->BindAction(
@@ -1218,6 +1249,7 @@ void ATheHousePlayerController::RTS_DeselectAll(bool bClosePlacedObjectSettings)
 void ATheHousePlayerController::CloseRtsModalUi(bool bClosePlacedObjectSettings)
 {
 	CloseRTSContextMenu();
+	CloseTheHouseSettingsMenu();
 	if (bClosePlacedObjectSettings)
 	{
 		ClosePlacedObjectSettingsWidget();
@@ -1922,6 +1954,28 @@ void ATheHousePlayerController::DebugSwitchToFPS() {
 
   const FRotator SpawnRot(0.f, GetControlRotation().Yaw, 0.f);
   SwitchToFPS(SpawnGroundPoint, SpawnRot);
+}
+
+void ATheHousePlayerController::Input_ToggleGraphicsProfile()
+{
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (UTheHouseGraphicsProfileSubsystem* Sub = GI->GetSubsystem<UTheHouseGraphicsProfileSubsystem>())
+		{
+			Sub->ToggleProfile();
+		}
+	}
+}
+
+void ATheHousePlayerController::TheHouse_SetGraphicsProfile(int32 ProfileIndex)
+{
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (UTheHouseGraphicsProfileSubsystem* Sub = GI->GetSubsystem<UTheHouseGraphicsProfileSubsystem>())
+		{
+			Sub->SetProfile(ProfileIndex != 0 ? ETheHouseGraphicsProfile::High : ETheHouseGraphicsProfile::Low);
+		}
+	}
 }
 
 
@@ -4504,7 +4558,8 @@ bool ATheHousePlayerController::TheHouse_IsModalRtsUiBlockingWorldSelection() co
 		   IsUnderGeometry(RTSNPCOrderOnObjectMenuInstance) ||
 		   IsUnderGeometry(RTSNPCOrderOnNPCMenuInstance) ||
 		   IsUnderGeometry(RTSNPCOrderOnGroundMenuInstance) ||
-		   IsUnderGeometry(PlacedObjectSettingsWidgetInstance);
+		   IsUnderGeometry(PlacedObjectSettingsWidgetInstance) ||
+		   IsUnderGeometry(TheHouseSettingsMenuWidgetInstance);
 }
 
 bool ATheHousePlayerController::TheHouse_IsCursorOverBlockingRTSViewportUI() const
@@ -4536,7 +4591,8 @@ bool ATheHousePlayerController::TheHouse_IsCursorOverBlockingRTSViewportUI() con
 		PlacedObjectSettingsWidgetInstance.Get(),
 		RTSNPCOrderOnObjectMenuInstance.Get(),
 		RTSNPCOrderOnNPCMenuInstance.Get(),
-		RTSNPCOrderOnGroundMenuInstance.Get());
+		RTSNPCOrderOnGroundMenuInstance.Get(),
+		TheHouseSettingsMenuWidgetInstance.Get());
 }
 
 void ATheHousePlayerController::Input_CancelOrCloseRts()
@@ -4547,6 +4603,12 @@ void ATheHousePlayerController::Input_CancelOrCloseRts()
 bool ATheHousePlayerController::TryConsumeEscapeForRtsUi()
 {
 	bool bHandled = false;
+
+	if (TheHouseSettingsMenuWidgetInstance)
+	{
+		CloseTheHouseSettingsMenu();
+		return true;
+	}
 
 	if (AnyRTSContextMenuOpen())
 	{
@@ -4654,6 +4716,45 @@ void ATheHousePlayerController::ClosePlacedObjectSettingsWidget()
 void ATheHousePlayerController::ClosePlacedObjectSettingsPanel()
 {
 	ClosePlacedObjectSettingsWidget();
+}
+
+void ATheHousePlayerController::OpenTheHouseSettingsMenu()
+{
+	if (!TheHouseSettingsMenuWidgetClass)
+	{
+		return;
+	}
+	CloseTheHouseSettingsMenu();
+	TheHouseSettingsMenuWidgetInstance =
+		CreateWidget<UTheHouseSettingsMenuWidget>(this, TheHouseSettingsMenuWidgetClass);
+	if (!TheHouseSettingsMenuWidgetInstance)
+	{
+		return;
+	}
+	TheHouseSettingsMenuWidgetInstance->BindToPlayerController(this);
+	TheHouseSettingsMenuWidgetInstance->SetVisibility(ESlateVisibility::Visible);
+	TheHouseSettingsMenuWidgetInstance->AddToViewport(250000);
+}
+
+void ATheHousePlayerController::CloseTheHouseSettingsMenu()
+{
+	if (TheHouseSettingsMenuWidgetInstance)
+	{
+		TheHouseSettingsMenuWidgetInstance->RemoveFromParent();
+		TheHouseSettingsMenuWidgetInstance = nullptr;
+	}
+}
+
+void ATheHousePlayerController::Input_TheHouseOpenSettings()
+{
+	if (TheHouseSettingsMenuWidgetInstance)
+	{
+		CloseTheHouseSettingsMenu();
+	}
+	else
+	{
+		OpenTheHouseSettingsMenu();
+	}
 }
 
 void ATheHousePlayerController::OpenPlacedObjectSettingsWidgetFor(ATheHouseObject* Obj)

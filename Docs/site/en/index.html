@@ -245,6 +245,7 @@ ATheHouseNPCCharacter + ATheHouseNPCAIController → NPCs (not the PlayerControl
         <li>Second mouse-wheel path alongside GameViewportClient → double zoom.</li>
         <li>Steep surfaces or no hit under cursor → invalid placement.</li>
         <li>The parameters panel “does not open”: verify <code>PlacedObjectSettingsWidgetClass</code> on the Player Controller BP, the object’s <code>Visibility</code> collision, then <code>bOpenParametersPanelOnLeftClick</code> on the object BP.</li>
+        <li>Day/night cycle: if <code>InGameTimeSeconds</code> starts at 0, then <code>DayProgress01=0</code> (midnight) and the sun can be forced off (black scene without <code>SkyLight</code>/<code>MoonLight</code>). See <code>Docs/Features/RTS_UI/README.md</code> → Day/Night cycle.</li>
       </ol>
 
       <h2 id="localization">Localization (full pipeline)</h2>
